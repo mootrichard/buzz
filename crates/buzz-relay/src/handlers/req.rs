@@ -7,8 +7,9 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY,
-    P_GATED_KINDS, RESULT_GATED_KINDS,
+    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_RUNNER_DEPLOYMENT, KIND_RUNNER_DEPLOYMENT_STATUS,
+    KIND_RUNNER_FRAME, KIND_RUNNER_REGISTRATION, KIND_RUNNER_STATUS, P_GATED_KINDS,
+    RESULT_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -47,7 +48,7 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
-    let (conn_id, pubkey_bytes, token_channel_ids) = {
+    let (conn_id, pubkey_bytes, token_channel_ids, runner_owner) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => {
@@ -71,7 +72,12 @@ pub async fn handle_req(
                     return;
                 }
 
-                (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
+                (
+                    conn.conn_id,
+                    pk_bytes,
+                    ctx.channel_ids.clone(),
+                    ctx.runner_owner_pubkey,
+                )
             }
             _ => {
                 conn.send(RelayMessage::notice(
@@ -86,23 +92,70 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
-        metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
-            .increment(1);
-        Vec::new()
-    } else {
-        match state
-            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-            .await
+    if let Some(owner) = runner_owner {
+        let runner = match buzz_core::PublicKey::from_slice(&pubkey_bytes) {
+            Ok(runner) => runner,
+            Err(_) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: invalid runner identity",
+                ));
+                return;
+            }
+        };
+        match super::runner_protocol::registration_is_active(
+            &state.db,
+            conn.tenant.community(),
+            &owner,
+            &runner,
+        )
+        .await
         {
-            Ok(ids) => ids,
-            Err(e) => {
-                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            Ok(true) => {}
+            Ok(false) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: runner registration is revoked",
+                ));
+                conn.cancel.cancel();
+                return;
+            }
+            Err(error) => {
+                warn!(conn_id = %conn_id, error, "runner registration revalidation failed");
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "error: runner registration lookup failed",
+                ));
                 return;
             }
         }
-    };
+        if !runner_filters_authorized(&filters, &runner.to_hex()) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: runners may only read addressed deployments and frames",
+            ));
+            return;
+        }
+    }
+
+    let mut accessible_channels =
+        if runner_owner.is_some() || filters_are_nip43_membership_only(&filters) {
+            metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
+                .increment(1);
+            Vec::new()
+        } else {
+            match state
+                .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
+                    conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                    return;
+                }
+            }
+        };
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
@@ -1060,18 +1113,57 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
         // lose the exemption — a kindless `ids` lookup is unaffected.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
         }
 
-        filter.generic_tags.get(&p_tag).is_some_and(|values| {
+        let p_matches = filter.generic_tags.get(&p_tag).is_some_and(|values| {
             !values.is_empty() && values.iter().all(|value| value == authed_pubkey_hex)
-        })
+        });
+        if p_matches {
+            return true;
+        }
+
+        let can_match_runner_kind = filter.kinds.as_ref().is_some_and(|ks| {
+            ks.iter().any(|kind| {
+                matches!(
+                    kind.as_u16() as u32,
+                    KIND_RUNNER_REGISTRATION
+                        | KIND_RUNNER_DEPLOYMENT
+                        | KIND_RUNNER_STATUS
+                        | KIND_RUNNER_DEPLOYMENT_STATUS
+                )
+            })
+        });
+        can_match_runner_kind
+            && filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && authors
+                        .iter()
+                        .all(|author| author.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
+            })
+    })
+}
+
+fn runner_filters_authorized(filters: &[Filter], runner_pubkey_hex: &str) -> bool {
+    let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    filters.iter().all(|filter| {
+        let allowed_kinds = filter.kinds.as_ref().is_some_and(|kinds| {
+            !kinds.is_empty()
+                && kinds.iter().all(|kind| {
+                    matches!(
+                        kind.as_u16() as u32,
+                        KIND_RUNNER_DEPLOYMENT | KIND_RUNNER_FRAME
+                    )
+                })
+        });
+        let addressed_to_runner = filter.generic_tags.get(&p_tag).is_some_and(|values| {
+            !values.is_empty() && values.iter().all(|value| value == runner_pubkey_hex)
+        });
+        allowed_kinds && addressed_to_runner
     })
 }
 
@@ -1588,6 +1680,37 @@ mod tests {
             ))
             .custom_tags(p_tag, [authed]);
         assert!(p_gated_filters_authorized(&[matching_p], authed));
+    }
+
+    #[test]
+    fn restricted_runner_filters_fail_closed_for_mixed_or_cross_runner_reads() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let runner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let deployment_kind = nostr::Kind::Custom(buzz_core::kind::KIND_RUNNER_DEPLOYMENT as u16);
+        let frame_kind = nostr::Kind::Custom(buzz_core::kind::KIND_RUNNER_FRAME as u16);
+
+        let deployment = Filter::new()
+            .kind(deployment_kind)
+            .custom_tags(p_tag, [runner]);
+        assert!(runner_filters_authorized(&[deployment], runner));
+
+        let cross_runner = Filter::new()
+            .kind(deployment_kind)
+            .custom_tags(p_tag, [other]);
+        assert!(!runner_filters_authorized(&[cross_runner], runner));
+
+        let mixed_kind = Filter::new()
+            .kind(deployment_kind)
+            .kind(nostr::Kind::TextNote)
+            .custom_tags(p_tag, [runner]);
+        assert!(!runner_filters_authorized(&[mixed_kind], runner));
+
+        let mixed_filters = [
+            Filter::new().kind(frame_kind).custom_tags(p_tag, [runner]),
+            Filter::new().kind(nostr::Kind::TextNote),
+        ];
+        assert!(!runner_filters_authorized(&mixed_filters, runner));
     }
 
     #[test]

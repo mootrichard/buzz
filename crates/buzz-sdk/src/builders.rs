@@ -11,12 +11,17 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE,
+        KIND_RUNNER_DEPLOYMENT, KIND_RUNNER_DEPLOYMENT_STATUS, KIND_RUNNER_FRAME,
+        KIND_RUNNER_REGISTRATION, KIND_RUNNER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
+    },
+    runner::{
+        deployment_coordinate, RunnerRegistrationState, RUNNER_AGENT_TAG, RUNNER_REGISTRATION_TAG,
+        RUNNER_TAG,
     },
 };
 use nostr::{EventBuilder, Kind, Tag};
@@ -272,6 +277,132 @@ pub fn build_agent_observer_frame(
         encrypted_content,
     )
     .tags(tags))
+}
+
+fn check_runner_ciphertext(encrypted_content: &str) -> Result<(), SdkError> {
+    if !content_looks_like_nip44(encrypted_content) {
+        return Err(SdkError::InvalidInput(
+            "runner event content must be NIP-44 v2 ciphertext".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build an owner-authored runner registration or revocation head (kind 30178).
+pub fn build_runner_registration(
+    runner_pubkey: &str,
+    state: RunnerRegistrationState,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_runner_ciphertext(encrypted_content)?;
+    let runner_pubkey = check_pubkey_hex(runner_pubkey, "runner_pubkey")?;
+    let tags = vec![
+        tag(&["d", &runner_pubkey])?,
+        tag(&["p", &runner_pubkey])?,
+        tag(&[RUNNER_TAG, &runner_pubkey])?,
+        tag(&[RUNNER_REGISTRATION_TAG, state.as_tag_value()])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_RUNNER_REGISTRATION as u16),
+        encrypted_content,
+    )
+    .tags(tags))
+}
+
+/// Build an owner-authored encrypted deployment desired-state head (kind 30179).
+pub fn build_runner_deployment(
+    runner_pubkey: &str,
+    agent_pubkey: &str,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_runner_ciphertext(encrypted_content)?;
+    let runner_pubkey = check_pubkey_hex(runner_pubkey, "runner_pubkey")?;
+    let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+    let coordinate = deployment_coordinate(&runner_pubkey, &agent_pubkey);
+    let tags = vec![
+        tag(&["d", &coordinate])?,
+        tag(&["p", &runner_pubkey])?,
+        tag(&[RUNNER_TAG, &runner_pubkey])?,
+        tag(&[RUNNER_AGENT_TAG, &agent_pubkey])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_RUNNER_DEPLOYMENT as u16),
+        encrypted_content,
+    )
+    .tags(tags))
+}
+
+/// Build a runner-authored encrypted capability and status head (kind 30180).
+pub fn build_runner_status(
+    owner_pubkey: &str,
+    runner_pubkey: &str,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_runner_ciphertext(encrypted_content)?;
+    let owner_pubkey = check_pubkey_hex(owner_pubkey, "owner_pubkey")?;
+    let runner_pubkey = check_pubkey_hex(runner_pubkey, "runner_pubkey")?;
+    let tags = vec![
+        tag(&["d", &runner_pubkey])?,
+        tag(&["p", &owner_pubkey])?,
+        tag(&[RUNNER_TAG, &runner_pubkey])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_RUNNER_STATUS as u16), encrypted_content).tags(tags))
+}
+
+/// Build a runner-authored encrypted per-agent deployment status head (kind 30181).
+pub fn build_runner_deployment_status(
+    owner_pubkey: &str,
+    runner_pubkey: &str,
+    agent_pubkey: &str,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_runner_ciphertext(encrypted_content)?;
+    let owner_pubkey = check_pubkey_hex(owner_pubkey, "owner_pubkey")?;
+    let runner_pubkey = check_pubkey_hex(runner_pubkey, "runner_pubkey")?;
+    let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+    let coordinate = deployment_coordinate(&runner_pubkey, &agent_pubkey);
+    let tags = vec![
+        tag(&["d", &coordinate])?,
+        tag(&["p", &owner_pubkey])?,
+        tag(&[RUNNER_TAG, &runner_pubkey])?,
+        tag(&[RUNNER_AGENT_TAG, &agent_pubkey])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_RUNNER_DEPLOYMENT_STATUS as u16),
+        encrypted_content,
+    )
+    .tags(tags))
+}
+
+/// Build an encrypted ephemeral runner frame (kind 24201).
+pub fn build_runner_frame(
+    recipient_pubkey: &str,
+    runner_pubkey: &str,
+    agent_pubkey: Option<&str>,
+    frame: &str,
+    encrypted_content: &str,
+) -> Result<EventBuilder, SdkError> {
+    if !matches!(
+        frame,
+        "secrets_put" | "purge_workspace" | "acknowledgement" | "heartbeat"
+    ) {
+        return Err(SdkError::InvalidInput(
+            "runner frame has an unsupported operation".into(),
+        ));
+    }
+    check_runner_ciphertext(encrypted_content)?;
+    let recipient_pubkey = check_pubkey_hex(recipient_pubkey, "recipient_pubkey")?;
+    let runner_pubkey = check_pubkey_hex(runner_pubkey, "runner_pubkey")?;
+    let mut tags = vec![
+        tag(&["p", &recipient_pubkey])?,
+        tag(&[RUNNER_TAG, &runner_pubkey])?,
+        tag(&["frame", frame])?,
+    ];
+    if let Some(agent_pubkey) = agent_pubkey {
+        let agent_pubkey = check_pubkey_hex(agent_pubkey, "agent_pubkey")?;
+        tags.push(tag(&[RUNNER_AGENT_TAG, &agent_pubkey])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_RUNNER_FRAME as u16), encrypted_content).tags(tags))
 }
 
 /// Build a forum post thread root (kind 45001).
@@ -1901,6 +2032,71 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn runner_deployment_uses_canonical_coordinate_and_encrypted_content() {
+        let owner = keys();
+        let runner = keys();
+        let agent = keys();
+        let encrypted = buzz_core::runner::encrypt_runner_payload(
+            &owner,
+            &runner.public_key(),
+            &serde_json::json!({"generation": 1}),
+        )
+        .unwrap();
+        let runner_hex = runner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+        let event =
+            sign(build_runner_deployment(&runner_hex, &agent_hex, &encrypted).expect("builder"));
+        assert_eq!(event.kind.as_u16(), KIND_RUNNER_DEPLOYMENT as u16);
+        assert!(has_tag(
+            &event,
+            "d",
+            &deployment_coordinate(&runner_hex, &agent_hex)
+        ));
+        assert!(has_tag(&event, "p", &runner_hex));
+        assert!(has_tag(&event, RUNNER_TAG, &runner_hex));
+        assert!(has_tag(&event, RUNNER_AGENT_TAG, &agent_hex));
+    }
+
+    #[test]
+    fn runner_registration_exposes_only_routing_state() {
+        let owner = keys();
+        let runner = keys();
+        let runner_hex = runner.public_key().to_hex();
+        let encrypted = buzz_core::runner::encrypt_runner_payload(
+            &owner,
+            &runner.public_key(),
+            &serde_json::json!({"name": "home server"}),
+        )
+        .unwrap();
+        let event = sign(
+            build_runner_registration(&runner_hex, RunnerRegistrationState::Active, &encrypted)
+                .expect("builder"),
+        );
+        assert_eq!(event.kind.as_u16(), KIND_RUNNER_REGISTRATION as u16);
+        assert!(has_tag(&event, "d", &runner_hex));
+        assert!(has_tag(&event, "p", &runner_hex));
+        assert!(has_tag(&event, RUNNER_REGISTRATION_TAG, "active"));
+        assert!(!event.content.contains("home server"));
+    }
+
+    #[test]
+    fn every_runner_builder_rejects_plaintext() {
+        let owner = "a".repeat(64);
+        let runner = "b".repeat(64);
+        let agent = "c".repeat(64);
+        assert!(
+            build_runner_registration(&runner, RunnerRegistrationState::Active, "plaintext")
+                .is_err()
+        );
+        assert!(build_runner_deployment(&runner, &agent, "plaintext").is_err());
+        assert!(build_runner_status(&owner, &runner, "plaintext").is_err());
+        assert!(build_runner_deployment_status(&owner, &runner, &agent, "plaintext").is_err());
+        assert!(
+            build_runner_frame(&owner, &runner, Some(&agent), "heartbeat", "plaintext").is_err()
+        );
     }
 
     #[test]

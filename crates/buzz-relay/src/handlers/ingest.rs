@@ -29,10 +29,12 @@ use buzz_core::kind::{
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
     KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    KIND_RUNNER_DEPLOYMENT, KIND_RUNNER_DEPLOYMENT_STATUS, KIND_RUNNER_FRAME,
+    KIND_RUNNER_REGISTRATION, KIND_RUNNER_STATUS, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
@@ -201,11 +203,14 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
+        | KIND_RUNNER_REGISTRATION | KIND_RUNNER_DEPLOYMENT | KIND_RUNNER_FRAME
         | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
-        KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        KIND_AGENT_TURN_METRIC | KIND_RUNNER_STATUS | KIND_RUNNER_DEPLOYMENT_STATUS => {
+            Ok(Scope::MessagesWrite)
+        }
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -410,6 +415,12 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
             | KIND_MANAGED_AGENT
+            // NIP-AR runner registrations, desired state, and status heads are
+            // global parameterized replaceable events.
+            | KIND_RUNNER_REGISTRATION
+            | KIND_RUNNER_DEPLOYMENT
+            | KIND_RUNNER_STATUS
+            | KIND_RUNNER_DEPLOYMENT_STATUS
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1500,6 +1511,25 @@ async fn ingest_event_inner(
         return Err(IngestError::AuthFailed(
             "invalid: event pubkey does not match authenticated identity".into(),
         ));
+    }
+
+    if matches!(
+        kind_u32,
+        KIND_RUNNER_REGISTRATION
+            | KIND_RUNNER_DEPLOYMENT
+            | KIND_RUNNER_STATUS
+            | KIND_RUNNER_DEPLOYMENT_STATUS
+            | KIND_RUNNER_FRAME
+    ) {
+        super::runner_protocol::authorize_runner_event(&state.db, tenant.community(), &event)
+            .await
+            .map_err(|reason| {
+                if reason.starts_with("restricted:") {
+                    IngestError::AuthFailed(reason)
+                } else {
+                    IngestError::Rejected(reason)
+                }
+            })?;
     }
 
     let required = match required_scope_for_kind(kind_u32, &event) {
@@ -2912,6 +2942,20 @@ mod tests {
                 "kind {kind} must not require an h-tag channel scope"
             );
         }
+    }
+
+    #[test]
+    fn runner_frames_are_allowed_for_owner_http_provisioning() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_RUNNER_FRAME, &dummy).unwrap(),
+            Scope::UsersWrite,
+            "kind:24201 owner frames must pass the HTTP ingest scope gate"
+        );
+        assert!(
+            buzz_core::kind::is_ephemeral(KIND_RUNNER_FRAME),
+            "kind:24201 must never enter durable storage"
+        );
     }
 
     #[test]

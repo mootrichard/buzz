@@ -12,9 +12,9 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 }
 
 /// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// private to a small set of principals. For NIP-AR runner kinds, the reader
+/// MUST be either the event author or its single `#p` recipient. For other
+/// result-gated kinds, the reader MUST equal the event's `#p` tag.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
 /// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
@@ -22,7 +22,20 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if !crate::kind::RESULT_GATED_KINDS.contains(&kind) {
+        return true;
+    }
+    if matches!(
+        kind,
+        crate::kind::KIND_RUNNER_REGISTRATION
+            | crate::kind::KIND_RUNNER_DEPLOYMENT
+            | crate::kind::KIND_RUNNER_STATUS
+            | crate::kind::KIND_RUNNER_DEPLOYMENT_STATUS
+    ) && event
+        .pubkey
+        .to_hex()
+        .eq_ignore_ascii_case(reader_pubkey_hex)
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -296,5 +309,32 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_runner_event_accepts_author_or_recipient_only() {
+        let owner = nostr::Keys::generate();
+        let runner = nostr::Keys::generate();
+        let attacker = nostr::Keys::generate();
+        let deployment = nostr::EventBuilder::new(
+            nostr::Kind::Custom(crate::kind::KIND_RUNNER_DEPLOYMENT as u16),
+            "encrypted",
+        )
+        .tags([nostr::Tag::public_key(runner.public_key())])
+        .sign_with_keys(&owner)
+        .expect("sign");
+
+        assert!(reader_authorized_for_event(
+            &deployment,
+            &owner.public_key().to_hex()
+        ));
+        assert!(reader_authorized_for_event(
+            &deployment,
+            &runner.public_key().to_hex()
+        ));
+        assert!(!reader_authorized_for_event(
+            &deployment,
+            &attacker.public_key().to_hex()
+        ));
     }
 }

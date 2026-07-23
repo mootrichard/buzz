@@ -337,7 +337,8 @@ export type ManagedAgentRuntimeStatus = {
 
 export type ManagedAgentBackend =
   | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
+  | { type: "provider"; id: string; config: Record<string, unknown> }
+  | { type: "runner"; runner_pubkey: string };
 
 export type ManagedAgent = {
   pubkey: string;
@@ -401,6 +402,13 @@ export type ManagedAgent = {
   autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
+  /** Paired runner identity; absent for local and legacy provider agents. */
+  runnerId: string | null;
+  desiredGeneration: number | null;
+  observedGeneration: number | null;
+  /** Runner/container state, deliberately separate from relay presence. */
+  deploymentState: string | null;
+  lastRunnerError: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
   /**

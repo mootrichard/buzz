@@ -84,6 +84,7 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { RemoteRunnersSettingsCard } from "./RemoteRunnersSettingsCard";
 
 export type SettingsSection =
   | "profile"
@@ -817,6 +818,7 @@ export function renderSettingsSection(
           <DoctorSettingsPanel />
           <ActiveAgentCommunitiesSettingsCard />
           <AgentDefaultsSettingsCard />
+          <RemoteRunnersSettingsCard ownerPubkey={props.currentPubkey} />
         </div>
       );
     case "channel-templates":

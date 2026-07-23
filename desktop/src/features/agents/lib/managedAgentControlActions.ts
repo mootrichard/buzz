@@ -31,13 +31,24 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
-export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
-  return agent.status === "running" || agent.status === "deployed";
+export function isManagedAgentActive(
+  agent: Pick<ManagedAgent, "status"> &
+    Partial<Pick<ManagedAgent, "deploymentState">>,
+) {
+  return (
+    agent.status === "running" ||
+    agent.status === "deployed" ||
+    (agent.deploymentState != null &&
+      ["pulling_image", "starting", "running"].includes(agent.deploymentState))
+  );
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+  }
+  if (agent.backend.type === "runner") {
+    return isManagedAgentActive(agent) ? "Stop" : "Start";
   }
 
   if (isManagedAgentActive(agent)) {

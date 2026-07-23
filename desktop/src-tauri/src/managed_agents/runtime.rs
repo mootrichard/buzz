@@ -1399,10 +1399,10 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
-        } else {
-            "not_deployed".to_string()
+        let status = match record.backend {
+            BackendKind::Runner { .. } => "stopped".to_string(),
+            _ if record.backend_agent_id.is_some() => "deployed".to_string(),
+            _ => "not_deployed".to_string(),
         };
         (status, None, String::new())
     } else {
@@ -1471,7 +1471,8 @@ pub fn build_managed_agent_summary(
                 super::adapter_availability_cached(),
             );
             hash_drift || availability_drift
-        });
+        })
+        || crate::commands::remote_restart_required(app, record);
 
     // Resolve the effective harness the same way, then derive args/mcp from it,
     // so the UI reflects the persona's current harness (or an explicit pin).
@@ -1481,6 +1482,9 @@ pub fn build_managed_agent_summary(
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .to_string();
+
+    let (runner_id, desired_generation, observed_generation, deployment_state, last_runner_error) =
+        crate::commands::remote_summary(app, record);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -1507,6 +1511,11 @@ pub fn build_managed_agent_summary(
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
+        runner_id,
+        desired_generation,
+        observed_generation,
+        deployment_state,
+        last_runner_error,
         status,
         pid,
         created_at: record.created_at.clone(),

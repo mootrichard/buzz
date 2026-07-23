@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1.7
+ARG RUST_VERSION=1.95
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+WORKDIR /build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --profile sprig --locked -p sprig \
+    && strip target/sprig/sprig
+
+FROM debian:${DEBIAN_VERSION}-slim
+LABEL org.opencontainers.image.title="Buzz Agent Runtime" \
+      org.opencontainers.image.description="Allowlisted Sprig-based Buzz agent runtime" \
+      org.opencontainers.image.source="https://github.com/block/buzz"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 buzz \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /workspace \
+       --shell /usr/sbin/nologin buzz
+COPY --from=builder /build/target/sprig/sprig /usr/local/bin/sprig
+COPY scripts/runner-agent-entrypoint.sh /usr/local/bin/runner-agent-entrypoint
+RUN chmod 0555 /usr/local/bin/sprig /usr/local/bin/runner-agent-entrypoint \
+    && ln -s /usr/local/bin/sprig /usr/local/bin/buzz-acp \
+    && ln -s /usr/local/bin/sprig /usr/local/bin/buzz-agent \
+    && ln -s /usr/local/bin/sprig /usr/local/bin/buzz-dev-mcp
+ENV BUZZ_ACP_AGENT_COMMAND=buzz-agent \
+    BUZZ_ACP_AGENT_ARGS=acp
+USER buzz:buzz
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/runner-agent-entrypoint"]

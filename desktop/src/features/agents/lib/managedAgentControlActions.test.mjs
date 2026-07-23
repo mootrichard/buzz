@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startManagedAgentWithRules } from "./managedAgentControlActions.ts";
+import {
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentActive,
+  startManagedAgentWithRules,
+} from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
   return {
@@ -76,4 +80,28 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("runner activity is derived from container state, not legacy deployed status", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+  assert.equal(isManagedAgentActive(runner), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(runner), "Stop");
+  assert.equal(
+    getManagedAgentPrimaryActionLabel({
+      ...runner,
+      deploymentState: "stopped_by_agent",
+    }),
+    "Start",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel({
+      ...runner,
+      deploymentState: "runner_offline",
+    }),
+    "Start",
+  );
 });
