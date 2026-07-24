@@ -80,6 +80,10 @@ ps:
 logs *ARGS:
     docker compose logs -f {{ARGS}}
 
+# Run the isolated Remote Runner development harness
+remote-runner-dev *ARGS:
+    ./scripts/remote-runner-dev.sh {{ARGS}}
+
 # ─── Build & Check ───────────────────────────────────────────────────────────
 
 # Build the Rust workspace

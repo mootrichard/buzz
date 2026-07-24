@@ -10,6 +10,38 @@ read-only root filesystem, all Linux capabilities dropped,
 `no-new-privileges`, an isolated persistent workspace, a private tmpfs, and
 operator-configured CPU and memory limits.
 
+## Local end-to-end development
+
+The repository includes an isolated convenience harness for testing the full
+relay → runner → Docker agent → Desktop path without changing the normal Buzz
+development database:
+
+```bash
+just remote-runner-dev up
+just remote-runner-dev pair
+just remote-runner-dev status
+```
+
+`up` starts a dedicated Postgres and Redis, builds the current branch's relay,
+runner, and Sprig runtime image, then launches the relay, runner, and Desktop in
+the background. It chooses a LAN-reachable relay URL so both Desktop and the
+Docker agent can use the same Nostr community host.
+
+Useful follow-up commands:
+
+```bash
+just remote-runner-dev logs runner --follow
+just remote-runner-dev desktop
+just remote-runner-dev down
+just remote-runner-dev reset --yes
+```
+
+`down` preserves the isolated database, runner identity, encrypted secrets, and
+workspaces so restart behavior can be tested. `reset --yes` permanently removes
+only resources marked as belonging to this harness. Run
+`just remote-runner-dev --help` for port, host, image, and state-directory
+overrides.
+
 ## Host preparation
 
 The runner uses two host paths:

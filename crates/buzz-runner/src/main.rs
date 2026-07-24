@@ -96,7 +96,8 @@ async fn wait_for_owner(store: &Store, configured: Option<String>) -> Result<Str
             }
         }
         tracing::info!(
-            "runner is waiting to be paired; run `docker compose exec buzz-runner buzz-runner pair`"
+            "runner is waiting to be paired; run `buzz-runner pair` with this state volume \
+             (Compose: `docker compose exec buzz-runner buzz-runner pair`)"
         );
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
