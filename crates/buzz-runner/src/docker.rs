@@ -97,44 +97,63 @@ impl DockerCli {
         ])
         .await
     }
-}
 
-#[async_trait]
-impl ContainerEngine for DockerCli {
-    async fn resolve_image(&self, image: &str) -> Result<ResolvedImage, String> {
-        let repo_digest = match Self::inspect_repo_digest(image).await {
-            Ok(value) => value,
-            Err(_) => {
-                Self::run(&["pull".into(), image.into()]).await?;
-                Self::inspect_repo_digest(image).await?
-            }
-        };
-        if let Some((_, digest)) = repo_digest.split_once('@') {
-            if digest.starts_with("sha256:") {
-                let digest = digest.to_string();
-                return Ok(ResolvedImage {
-                    reference: repo_digest,
-                    digest,
-                });
-            }
-        }
-        let image_id = Self::run(&[
+    async fn inspect_image_id(image: &str) -> Result<String, String> {
+        Self::run(&[
             "image".into(),
             "inspect".into(),
             "--format".into(),
             "{{.Id}}".into(),
             image.into(),
         ])
-        .await?;
-        if !image_id.starts_with("sha256:") {
-            return Err(format!(
-                "image {image} did not resolve to immutable content"
-            ));
-        }
-        Ok(ResolvedImage {
+        .await
+    }
+
+    fn resolved_repo_digest(repo_digest: String) -> Option<ResolvedImage> {
+        let digest = repo_digest.split_once('@')?.1.to_string();
+        digest.starts_with("sha256:").then_some(ResolvedImage {
+            reference: repo_digest,
+            digest,
+        })
+    }
+
+    fn resolved_image_id(image_id: String) -> Option<ResolvedImage> {
+        image_id.starts_with("sha256:").then_some(ResolvedImage {
             reference: image_id.clone(),
             digest: image_id,
         })
+    }
+}
+
+#[async_trait]
+impl ContainerEngine for DockerCli {
+    async fn resolve_image(&self, image: &str) -> Result<ResolvedImage, String> {
+        if let Ok(repo_digest) = Self::inspect_repo_digest(image).await {
+            if let Some(resolved) = Self::resolved_repo_digest(repo_digest) {
+                return Ok(resolved);
+            }
+        }
+
+        // Images built directly on the runner host have no RepoDigests entry.
+        // Their content-addressed Docker image ID is still immutable and is
+        // safe to use as the container creation reference.
+        if let Ok(image_id) = Self::inspect_image_id(image).await {
+            if let Some(resolved) = Self::resolved_image_id(image_id) {
+                return Ok(resolved);
+            }
+        }
+
+        Self::run(&["pull".into(), image.into()]).await?;
+        if let Ok(repo_digest) = Self::inspect_repo_digest(image).await {
+            if let Some(resolved) = Self::resolved_repo_digest(repo_digest) {
+                return Ok(resolved);
+            }
+        }
+        Self::inspect_image_id(image)
+            .await
+            .ok()
+            .and_then(Self::resolved_image_id)
+            .ok_or_else(|| format!("image {image} did not resolve to immutable content"))
     }
 
     async fn inspect(&self, name: &str) -> Result<ContainerState, String> {

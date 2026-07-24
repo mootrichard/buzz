@@ -3,6 +3,43 @@ use std::collections::BTreeMap;
 use buzz_runner::docker::{ContainerEngine, ContainerSpec, DockerCli};
 
 #[tokio::test]
+#[ignore = "requires a local Docker daemon"]
+async fn resolves_a_locally_built_image_without_pulling_it() {
+    let engine = DockerCli;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(
+        temporary.path().join("Dockerfile"),
+        "FROM scratch\nLABEL com.buzz.test=local-image\n",
+    )
+    .expect("write Dockerfile");
+    let tag = format!("buzz-runner-local-resolution-test:{}", std::process::id());
+    let build = tokio::process::Command::new("docker")
+        .args(["build", "--quiet", "--tag", &tag, "."])
+        .current_dir(temporary.path())
+        .output()
+        .await
+        .expect("build local image");
+    assert!(
+        build.status.success(),
+        "docker build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let resolved = engine
+        .resolve_image(&tag)
+        .await
+        .expect("resolve local image");
+    let remove = tokio::process::Command::new("docker")
+        .args(["image", "rm", &tag])
+        .output()
+        .await
+        .expect("remove local image tag");
+    assert!(remove.status.success());
+    assert!(resolved.reference.starts_with("sha256:"));
+    assert_eq!(resolved.reference, resolved.digest);
+}
+
+#[tokio::test]
 #[ignore = "requires a local Docker daemon and network access"]
 async fn creates_container_with_runner_security_contract() {
     let engine = DockerCli;
