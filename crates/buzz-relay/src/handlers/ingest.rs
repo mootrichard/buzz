@@ -1758,6 +1758,21 @@ async fn ingest_event_inner(
         ));
     }
 
+    // Owner provisioning reaches the relay over the NIP-98 HTTP bridge, while
+    // the runner receives the encrypted capsule over its WebSocket
+    // subscription. The frame has passed signature, owner/runner direction,
+    // scope, timestamp, and restriction checks above; fan it out through the
+    // shared ephemeral path instead of sending it to durable event storage.
+    if auth.is_http() && kind_u32 == KIND_RUNNER_FRAME {
+        super::event::dispatch_global_ephemeral_event(state, tenant, &event).await;
+        info!(event_id = %event_id_hex, kind = kind_u32, "Ephemeral event ingested via pipeline");
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
     // E1 (§4.8): fetch the community-scoped channel row once per request and
     // thread it through the gates below (membership open-fallback, archived

@@ -976,36 +976,39 @@ async fn handle_ephemeral_event(
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
         fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     } else {
-        // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
-        //
-        // Sentinel pattern: we use `Uuid::nil()` (all-zeros UUID) as a
-        // "global channel" routing key in Redis pub/sub. This lets other relay
-        // nodes receive and fan out these events without any real channel_id.
-        // The nil UUID is ONLY a Redis routing key — it never reaches the DB.
-        // On the receiving end (main.rs subscriber loop), `is_nil()` is checked
-        // and converted back to `None` so `fan_out()` uses the global index.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Global, &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers through the guarded send path.
-        // Pass channel_id=None so fan_out() uses the global subscriber index;
-        // filter_fanout_by_access no-ops for channel-less events except the
-        // author-only-kind gate.
-        let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        dispatch_global_ephemeral_event(&state, &conn.tenant, &event).await;
     }
 
     conn.send(RelayMessage::ok(event_id_hex, true, ""));
+}
+
+/// Publish an already-verified channel-less ephemeral event without storing it.
+///
+/// WebSocket EVENT messages and owner-authenticated HTTP runner provisioning
+/// both use this seam. The nil global Redis topic is converted back to
+/// `channel_id = None` by subscribers, and direct local fan-out avoids waiting
+/// for the Redis round trip.
+pub(crate) async fn dispatch_global_ephemeral_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &Event,
+) {
+    let event_id_hex = event.id.to_hex();
+    state.mark_local_event(tenant.community(), &event.id);
+
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Global, event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+    }
+
+    let stored_event = StoredEvent::new(event.clone(), None);
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
