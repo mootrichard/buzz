@@ -20,6 +20,7 @@ nostr = { workspace = true }
 rand = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

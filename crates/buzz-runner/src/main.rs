@@ -56,6 +56,12 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // Both aws-lc-rs and ring are compiled in transitively, so rustls cannot
+    // choose a process-level provider automatically when the runner first
+    // connects to a wss:// relay.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| "failed to install rustls crypto provider".to_string())?;
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
