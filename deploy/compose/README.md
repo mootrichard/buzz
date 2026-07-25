@@ -19,6 +19,22 @@ cd deploy/compose
 BUZZ_COMPOSE_TLS=true ./run.sh start
 ```
 
+For a Cloudflare Tunnel or another TLS-terminating proxy whose origin is
+`http://127.0.0.1:3000`, enable the stateless NIP-AB pairing sidecar:
+
+```bash
+# Set this in .env:
+BUZZ_PAIRING_RELAY_URL=wss://buzz.example.com/pair
+
+./run.sh start
+```
+
+The pairing overlay puts a local Caddy origin on port 3000. It proxies `/pair`
+to `buzz-pair-relay` and all other requests to the main relay, so no tunnel or
+DNS change is required. `run.sh` automatically enables the overlay whenever
+`BUZZ_PAIRING_RELAY_URL` is set in `.env`; `BUZZ_COMPOSE_PAIRING=true` is
+available as an explicit override.
+
 The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.

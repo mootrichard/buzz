@@ -5,6 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 COMPOSE_FILES=(-f compose.yml)
+PAIRING_ENABLED="${BUZZ_COMPOSE_PAIRING:-}"
+if [[ -z "${PAIRING_ENABLED}" ]] && [[ -f .env ]] && grep -Eq '^BUZZ_PAIRING_RELAY_URL=.+' .env; then
+  PAIRING_ENABLED=true
+fi
+if [[ "${PAIRING_ENABLED}" == "true" ]]; then
+  COMPOSE_FILES+=(-f compose.pairing.yml)
+fi
 if [[ "${BUZZ_COMPOSE_TLS:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.caddy.yml)
 fi
@@ -121,6 +128,11 @@ Commands:
   roster event. Do not use parallel adds (e.g. xargs -P).
 
 Environment switches:
+  BUZZ_COMPOSE_PAIRING=true
+                           Run the NIP-AB pairing sidecar and route /pair through
+                           the local HTTP origin. The overlay is also enabled
+                           automatically when BUZZ_PAIRING_RELAY_URL is set in
+                           .env.
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
 MSG
