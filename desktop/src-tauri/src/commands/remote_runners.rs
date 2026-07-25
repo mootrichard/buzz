@@ -411,6 +411,20 @@ fn next_generation(app: &AppHandle, agent_pubkey: &str) -> u64 {
     )
 }
 
+fn apply_remote_runtime_environment(
+    environment: &mut BTreeMap<String, String>,
+    mcp_command: Option<&str>,
+    mcp_hooks: bool,
+) {
+    environment.insert(
+        "BUZZ_ACP_MCP_COMMAND".into(),
+        mcp_command.unwrap_or_default().to_string(),
+    );
+    if mcp_hooks {
+        environment.insert("MCP_HOOK_SERVERS".into(), "*".into());
+    }
+}
+
 pub(crate) async fn publish_remote_deployment(
     app: &AppHandle,
     state: &AppState,
@@ -488,6 +502,7 @@ pub(crate) async fn publish_remote_deployment(
         environment.insert("BUZZ_ACP_MULTIPLE_EVENT_HANDLING".into(), "steer".into());
         environment.insert("BUZZ_ACP_DEDUP".into(), "queue".into());
         environment.insert("BUZZ_ACP_RELAY_OBSERVER".into(), "true".into());
+        apply_remote_runtime_environment(&mut environment, runtime.mcp_command, runtime.mcp_hooks);
         if let Some(prompt) = crate::managed_agents::spawn_hash::effective_spawn_prompt(record) {
             environment.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), prompt);
         }
@@ -803,5 +818,21 @@ mod tests {
         let (_, _, version, parsed_nonce) = parse_pairing_uri(&uri).expect("valid URI");
         assert_eq!(version, RUNNER_PROTOCOL_VERSION);
         assert_eq!(pairing_sas(&parsed_nonce).expect("sas").len(), 6);
+    }
+
+    #[test]
+    fn remote_runtime_environment_includes_mcp_wiring() {
+        let mut environment = BTreeMap::new();
+
+        apply_remote_runtime_environment(&mut environment, Some("buzz-dev-mcp"), true);
+
+        assert_eq!(
+            environment.get("BUZZ_ACP_MCP_COMMAND").map(String::as_str),
+            Some("buzz-dev-mcp")
+        );
+        assert_eq!(
+            environment.get("MCP_HOOK_SERVERS").map(String::as_str),
+            Some("*")
+        );
     }
 }
