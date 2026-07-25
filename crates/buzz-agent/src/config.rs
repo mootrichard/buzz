@@ -726,8 +726,9 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
-    /// Optional OpenAI function to force on the first provider request of each
-    /// user turn. Subsequent requests return to automatic tool selection.
+    /// Optional OpenAI function whose availability requires a tool call on the
+    /// first provider request of each user turn. Subsequent requests return to
+    /// automatic tool selection.
     pub openai_initial_tool: Option<String>,
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no

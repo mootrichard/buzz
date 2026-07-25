@@ -558,10 +558,7 @@ fn openai_chat_tool_choice(cfg: &Config, history: &[HistoryItem], tools: &[ToolD
             && tools.iter().any(|tool| tool.name == *name)
     });
     match initial_tool {
-        Some(name) => json!({
-            "type": "function",
-            "function": {"name": name},
-        }),
+        Some(_) => json!("required"),
         None => json!("auto"),
     }
 }
@@ -1377,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_body_forces_configured_tool_on_first_round() {
+    fn openai_body_requires_a_tool_on_first_round() {
         let mut cfg = cfg(Provider::OpenAi);
         cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
         let tools = vec![ToolDef {
@@ -1395,13 +1392,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            body["tool_choice"],
-            serde_json::json!({
-                "type": "function",
-                "function": {"name": "buzz-dev-mcp__shell"},
-            })
-        );
+        assert_eq!(body["tool_choice"], "required");
     }
 
     #[test]
