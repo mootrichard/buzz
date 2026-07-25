@@ -547,9 +547,23 @@ fn openai_body(
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
-        body["tool_choice"] = json!("auto");
+        body["tool_choice"] = openai_chat_tool_choice(cfg, history, tools);
     }
     body
+}
+
+fn openai_chat_tool_choice(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
+    let initial_tool = cfg.openai_initial_tool.as_deref().filter(|name| {
+        matches!(history.last(), Some(HistoryItem::User(_)))
+            && tools.iter().any(|tool| tool.name == *name)
+    });
+    match initial_tool {
+        Some(name) => json!({
+            "type": "function",
+            "function": {"name": name},
+        }),
+        None => json!("auto"),
+    }
 }
 
 fn openai_tool_text_content(content: &[ToolResultContent]) -> String {
@@ -1249,6 +1263,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            openai_initial_tool: None,
             hints_enabled: true,
             thinking_effort: None,
         }
@@ -1358,6 +1373,65 @@ mod tests {
             tool.get("function").is_none(),
             "Responses tool schema is flat"
         );
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn openai_body_forces_configured_tool_on_first_round() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        let tools = vec![ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = openai_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("reply in Buzz".into())],
+            &tools,
+            "model",
+            None,
+        );
+
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "buzz-dev-mcp__shell"},
+            })
+        );
+    }
+
+    #[test]
+    fn openai_body_returns_to_auto_after_forced_tool_result() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        let tools = vec![ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let history = vec![
+            HistoryItem::User("reply in Buzz".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_1".into(),
+                    name: "buzz-dev-mcp__shell".into(),
+                    arguments: serde_json::json!({"command": "buzz messages send"}),
+                }],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_1".into(),
+                content: vec![ToolResultContent::Text("accepted".into())],
+                is_error: false,
+            }),
+        ];
+
+        let body = openai_body(&cfg, "system", &history, &tools, "model", None);
+
         assert_eq!(body["tool_choice"], "auto");
     }
 

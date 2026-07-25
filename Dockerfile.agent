@@ -30,6 +30,7 @@ RUN chmod 0555 /usr/local/bin/sprig /usr/local/bin/runner-agent-entrypoint \
 ENV BUZZ_ACP_AGENT_COMMAND=buzz-agent \
     BUZZ_ACP_AGENT_ARGS=acp \
     BUZZ_ACP_MCP_COMMAND=buzz-dev-mcp \
+    BUZZ_AGENT_OPENAI_INITIAL_TOOL=buzz-dev-mcp__shell \
     MCP_HOOK_SERVERS=*
 USER buzz:buzz
 WORKDIR /workspace
