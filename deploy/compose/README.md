@@ -35,6 +35,35 @@ DNS change is required. `run.sh` automatically enables the overlay whenever
 `BUZZ_PAIRING_RELAY_URL` is set in `.env`; `BUZZ_COMPOSE_PAIRING=true` is
 available as an explicit override.
 
+## Always-on agents
+
+The optional Remote Runner supervises hardened agent containers independently
+of Desktop. It controls the host Docker socket and is therefore a trusted,
+root-equivalent service intended for a single owner.
+
+Enable it in `.env`:
+
+```bash
+BUZZ_RUNNER_ENABLED=true
+BUZZ_IMAGE=buzz-relay:runner-local
+BUZZ_RUNNER_IMAGE=buzz-runner:local
+BUZZ_RUNNER_AGENT_IMAGE=buzz-agent:local
+BUZZ_RUNNER_RUNTIMES={"buzz-agent":"buzz-agent:local"}
+```
+
+Build the runner-capable relay and runtime images, then start the stack:
+
+```bash
+./run.sh runner-build
+./run.sh start
+./run.sh runner-pair
+```
+
+Pairing is completed from Buzz Desktop under **Settings → Remote runners**.
+Confirm the six-digit SAS on both screens. The owner key remains on Desktop;
+the server persists only its own runner identity, encrypted deployment
+secrets, and agent workspaces under `/var/lib/buzz-runner`.
+
 The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.

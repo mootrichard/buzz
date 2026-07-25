@@ -12,6 +12,13 @@ fi
 if [[ "${PAIRING_ENABLED}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.pairing.yml)
 fi
+RUNNER_ENABLED="${BUZZ_COMPOSE_RUNNER:-}"
+if [[ -z "${RUNNER_ENABLED}" ]] && [[ -f .env ]] && grep -Eq '^BUZZ_RUNNER_ENABLED=true$' .env; then
+  RUNNER_ENABLED=true
+fi
+if [[ "${RUNNER_ENABLED}" == "true" ]]; then
+  COMPOSE_FILES+=(-f compose.runner.yml)
+fi
 if [[ "${BUZZ_COMPOSE_TLS:-false}" == "true" ]]; then
   COMPOSE_FILES+=(-f compose.caddy.yml)
 fi
@@ -79,6 +86,22 @@ case "${1:-help}" in
     compose up -d --wait
     backup_hint
     ;;
+  runner-build)
+    require_env
+    if [[ "${RUNNER_ENABLED}" != "true" ]]; then
+      echo "Set BUZZ_RUNNER_ENABLED=true in .env before building the runner." >&2
+      exit 1
+    fi
+    compose --profile runner-build build relay buzz-agent-image buzz-runner
+    ;;
+  runner-pair)
+    require_env
+    if [[ "${RUNNER_ENABLED}" != "true" ]]; then
+      echo "Set BUZZ_RUNNER_ENABLED=true in .env before pairing the runner." >&2
+      exit 1
+    fi
+    compose exec buzz-runner buzz-runner pair
+    ;;
   logs)
     shift || true
     compose logs -f "${@:-relay}"
@@ -112,6 +135,8 @@ Commands:
   restart       Recreate the relay after env/image changes
   pull          Pull configured images
   upgrade       Pull and restart, then print backup reminders
+  runner-build  Build the runner-capable relay, runner, and agent runtime images
+  runner-pair   Start owner-approved Remote Runner pairing
   logs [svc]    Follow logs (default: relay)
   status        Show compose service status
   config        Render merged compose config
@@ -133,6 +158,10 @@ Environment switches:
                            the local HTTP origin. The overlay is also enabled
                            automatically when BUZZ_PAIRING_RELAY_URL is set in
                            .env.
+  BUZZ_COMPOSE_RUNNER=true
+                           Run the always-on Remote Runner. The overlay is also
+                           enabled automatically when BUZZ_RUNNER_ENABLED=true
+                           is set in .env.
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS
   BUZZ_COMPOSE_DEV=true   Include compose.dev.yml for local admin ports/tools
 MSG

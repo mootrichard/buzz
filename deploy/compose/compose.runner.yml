@@ -1,0 +1,37 @@
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+
+  buzz-agent-image:
+    image: ${BUZZ_RUNNER_AGENT_IMAGE:-buzz-agent:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile.agent
+    profiles: ["runner-build"]
+    command: ["--help"]
+
+  buzz-runner:
+    image: ${BUZZ_RUNNER_IMAGE:-buzz-runner:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile.runner
+    command: ["run"]
+    environment:
+      BUZZ_RELAY_URL: ${RELAY_URL}
+      BUZZ_RUNNER_OWNER_PUBKEY: ${BUZZ_RUNNER_OWNER_PUBKEY:-}
+      BUZZ_RUNNER_RUNTIMES: ${BUZZ_RUNNER_RUNTIMES:-{"buzz-agent":"buzz-agent:local"}}
+      BUZZ_RUNNER_AGENT_CPUS: ${BUZZ_RUNNER_AGENT_CPUS:-2}
+      BUZZ_RUNNER_AGENT_MEMORY: ${BUZZ_RUNNER_AGENT_MEMORY:-4g}
+      RUST_LOG: ${BUZZ_RUNNER_LOG:-buzz_runner=info}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/buzz-runner:/var/lib/buzz-runner
+      - /run/buzz-runner:/run/buzz-runner
+    restart: unless-stopped
+    networks:
+      - buzz-net
+    labels:
+      com.buzz.service: "runner"
+      com.buzz.trust: "docker-root-equivalent"
