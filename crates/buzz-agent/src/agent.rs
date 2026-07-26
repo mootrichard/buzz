@@ -204,6 +204,21 @@ impl RunCtx<'_> {
                 .await;
             }
 
+            let required_initial_tool_missing = round == 1
+                && self
+                    .cfg
+                    .openai_initial_tool
+                    .as_ref()
+                    .is_some_and(|name| tools.iter().any(|tool| tool.name == *name))
+                && response.tool_calls.is_empty();
+            if required_initial_tool_missing {
+                return Err(AgentError::Llm(
+                    "provider ignored the required initial tool call; refusing to end the turn \
+                     with an invisible assistant-only response"
+                        .into(),
+                ));
+            }
+
             if response.tool_calls.is_empty() {
                 if response.stop == ProviderStop::ToolUse {
                     return Err(AgentError::Llm(

@@ -481,6 +481,19 @@ fn openai_body(
     effective_model: &str,
     effort: Option<ThinkingEffort>,
 ) -> Value {
+    let initial_tool = openai_chat_initial_tool(cfg, history, tools);
+    let system_prompt = match initial_tool {
+        Some(name) => format!(
+            "{system_prompt}\n\n\
+             [Required first action]\n\
+             Normal assistant text from this first round is not delivered to the user. \
+             You MUST call `{name}`. The tool call itself must perform the user-visible \
+             action; do not merely echo, print, or describe what should happen. For a Buzz \
+             reply, execute `buzz messages send` with the channel and reply destination from \
+             the user context."
+        ),
+        None => system_prompt.to_string(),
+    };
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
     // Images returned from tool calls ride on a trailing `role:"user"`
     // message because OpenAI Chat's `role:"tool"` content is text-only. We
@@ -547,20 +560,26 @@ fn openai_body(
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
-        body["tool_choice"] = openai_chat_tool_choice(cfg, history, tools);
+        body["tool_choice"] = match initial_tool {
+            Some(name) => json!({
+                "type": "function",
+                "function": {"name": name},
+            }),
+            None => json!("auto"),
+        };
     }
     body
 }
 
-fn openai_chat_tool_choice(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
-    let initial_tool = cfg.openai_initial_tool.as_deref().filter(|name| {
+fn openai_chat_initial_tool<'a>(
+    cfg: &'a Config,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+) -> Option<&'a str> {
+    cfg.openai_initial_tool.as_deref().filter(|name| {
         matches!(history.last(), Some(HistoryItem::User(_)))
             && tools.iter().any(|tool| tool.name == *name)
-    });
-    match initial_tool {
-        Some(_) => json!("required"),
-        None => json!("auto"),
-    }
+    })
 }
 
 fn openai_tool_text_content(content: &[ToolResultContent]) -> String {
@@ -1374,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_body_requires_a_tool_on_first_round() {
+    fn openai_body_forces_configured_tool_and_explains_delivery_on_first_round() {
         let mut cfg = cfg(Provider::OpenAi);
         cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
         let tools = vec![ToolDef {
@@ -1392,7 +1411,16 @@ mod tests {
             None,
         );
 
-        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "buzz-dev-mcp__shell"},
+            })
+        );
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Normal assistant text"));
+        assert!(system.contains("execute `buzz messages send`"));
     }
 
     #[test]
@@ -1424,6 +1452,7 @@ mod tests {
         let body = openai_body(&cfg, "system", &history, &tools, "model", None);
 
         assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["messages"][0]["content"], "system");
     }
 
     #[test]
