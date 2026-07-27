@@ -51,6 +51,7 @@ type MockManagedAgentSeed = {
   channelIds?: string[];
   backend?:
     | { type: "local" }
+    | { type: "runner"; runner_pubkey: string }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
   lastErrorCode?: number | null;

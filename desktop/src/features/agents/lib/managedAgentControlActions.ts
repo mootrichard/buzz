@@ -43,6 +43,16 @@ export function isManagedAgentActive(
   );
 }
 
+export function canRestartManagedAgent(
+  agent: Pick<ManagedAgent, "backend" | "status"> &
+    Partial<Pick<ManagedAgent, "deploymentState">>,
+) {
+  return (
+    (agent.backend.type === "local" || agent.backend.type === "runner") &&
+    isManagedAgentActive(agent)
+  );
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canRestartManagedAgent,
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
+  respawnManagedAgentWithRules,
   startManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
 
@@ -104,4 +106,51 @@ test("runner activity is derived from container state, not legacy deployed statu
     }),
     "Start",
   );
+});
+
+test("active runner deployments expose the same restart action as local agents", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+
+  assert.equal(canRestartManagedAgent(runner), true);
+  assert.equal(
+    canRestartManagedAgent({
+      ...runner,
+      deploymentState: "stopped_by_owner",
+    }),
+    false,
+  );
+  assert.equal(
+    canRestartManagedAgent({
+      ...runner,
+      backend: { type: "provider", id: "cloud", config: {} },
+      status: "deployed",
+      deploymentState: null,
+    }),
+    false,
+  );
+});
+
+test("restarting a runner publishes one new desired generation without stopping first", async () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+  const calls = [];
+
+  await respawnManagedAgentWithRules({
+    agent: runner,
+    startManagedAgent: async (pubkey) => {
+      calls.push(`start:${pubkey}`);
+    },
+    stopManagedAgent: async (pubkey) => {
+      calls.push(`stop:${pubkey}`);
+    },
+  });
+
+  assert.deepEqual(calls, [`start:${runner.pubkey}`]);
 });
