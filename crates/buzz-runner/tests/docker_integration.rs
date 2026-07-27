@@ -100,3 +100,68 @@ async fn creates_container_with_runner_security_contract() {
         .iter()
         .any(|mount| { mount["Destination"] == "/workspace" && mount["RW"] == true })));
 }
+
+#[tokio::test]
+#[ignore = "requires a local Docker daemon and takes about 25 seconds"]
+async fn stop_allows_agent_to_finish_its_graceful_shutdown() {
+    let engine = DockerCli;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(
+        temporary.path().join("Dockerfile"),
+        r#"FROM alpine:3.20
+CMD ["sh", "-c", "trap 'sleep 21; exit 0' TERM; while true; do sleep 1 & wait $!; done"]
+"#,
+    )
+    .expect("write Dockerfile");
+    let tag = format!("buzz-runner-graceful-stop-test:{}", std::process::id());
+    let build = tokio::process::Command::new("docker")
+        .args(["build", "--quiet", "--tag", &tag, "."])
+        .current_dir(temporary.path())
+        .output()
+        .await
+        .expect("build graceful-stop image");
+    assert!(
+        build.status.success(),
+        "docker build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let resolved = engine.resolve_image(&tag).await.expect("resolve image");
+    let workspace = temporary.path().join("workspace");
+    let secrets = temporary.path().join("secrets");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&secrets).expect("secrets");
+    let name = format!("buzz-runner-graceful-stop-{}", std::process::id());
+    let spec = ContainerSpec {
+        name: name.clone(),
+        image: tag.clone(),
+        image_digest: resolved.digest,
+        immutable_image: resolved.reference,
+        workspace_dir: workspace,
+        secrets_dir: secrets,
+        cpu_limit: "1".into(),
+        memory_limit: "128m".into(),
+        labels: BTreeMap::new(),
+    };
+    engine.create(&spec).await.expect("create container");
+    engine.start(&name).await.expect("start container");
+
+    engine.stop(&name).await.expect("stop container");
+    let state = engine
+        .inspect(&name)
+        .await
+        .expect("inspect stopped container");
+
+    engine.remove(&name).await.expect("remove container");
+    let remove_image = tokio::process::Command::new("docker")
+        .args(["image", "rm", &tag])
+        .output()
+        .await
+        .expect("remove graceful-stop image");
+    assert!(remove_image.status.success());
+    assert_eq!(
+        state,
+        buzz_runner::docker::ContainerState::Exited(0),
+        "runner must not SIGKILL an agent still inside its shutdown grace window"
+    );
+}

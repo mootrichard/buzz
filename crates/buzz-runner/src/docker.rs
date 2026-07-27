@@ -6,6 +6,11 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use tokio::process::Command;
 
+// buzz-acp drains in-flight prompts for up to 30 seconds, then publishes
+// offline presence and closes its relay connection. Keep Docker's SIGKILL
+// deadline beyond that full graceful-shutdown budget.
+const AGENT_STOP_TIMEOUT_SECS: &str = "45";
+
 /// Desired immutable container attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
@@ -233,9 +238,14 @@ impl ContainerEngine for DockerCli {
         if state == ContainerState::Missing {
             return Ok(());
         }
-        Self::run(&["stop".into(), "--time".into(), "20".into(), name.into()])
-            .await
-            .map(|_| ())
+        Self::run(&[
+            "stop".into(),
+            "--time".into(),
+            AGENT_STOP_TIMEOUT_SECS.into(),
+            name.into(),
+        ])
+        .await
+        .map(|_| ())
     }
 
     async fn remove(&self, name: &str) -> Result<(), String> {
