@@ -5,6 +5,7 @@ import {
   pickPreferredManagedAgent,
 } from "@/features/agents/agentReuse";
 export { findReusableAgent } from "@/features/agents/agentReuse";
+import { shouldStartManagedAgentForMention } from "@/features/agents/lib/managedAgentControlActions";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveManagedAgentAvatarUrl } from "@/features/agents/ui/managedAgentAvatar";
 import {
@@ -130,23 +131,12 @@ export async function attachManagedAgentToChannel(
   let started = false;
 
   if (ensureRunning) {
-    // Running agents (local or provider) auto-discover new channel membership
-    // via the harness's membership notifications — no restart needed. Only
-    // not-yet-running agents need a start/deploy call before the first mention
-    // can reach them. For a local agent the status check and the start are both
-    // pair-scoped to the active community: `agent.status` reflects that
-    // community's (agent, relay) pair, and `startManagedAgent` spawns that same
-    // pair — so this ensures the pair the caller is attaching to, never
-    // another community's.
-    const isRemote = input.agent.backend.type === "provider";
-    if (isRemote && input.agent.status !== "deployed") {
-      agent = await startManagedAgent(input.agent.pubkey);
-      started = true;
-    } else if (
-      !isRemote &&
-      input.agent.status !== "running" &&
-      input.agent.status !== "deployed"
-    ) {
+    // Active local, provider, and runner-backed agents auto-discover new
+    // channel membership via harness notifications — no restart needed.
+    // Only inactive agents need a start/deploy before the first mention can
+    // reach them. Runner activity comes from deploymentState because no local
+    // process exists to make status "running".
+    if (shouldStartManagedAgentForMention(input.agent)) {
       agent = await startManagedAgent(input.agent.pubkey);
       started = true;
     }

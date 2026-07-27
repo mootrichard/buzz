@@ -6,6 +6,7 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
   respawnManagedAgentWithRules,
+  shouldStartManagedAgentForMention,
   startManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
 
@@ -131,6 +132,23 @@ test("active runner deployments expose the same restart action as local agents",
       deploymentState: null,
     }),
     false,
+  );
+});
+
+test("mentioning an active runner deployment does not publish another start generation", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+
+  assert.equal(shouldStartManagedAgentForMention(runner), false);
+  assert.equal(
+    shouldStartManagedAgentForMention({
+      ...runner,
+      deploymentState: "stopped_by_owner",
+    }),
+    true,
   );
 });
 
