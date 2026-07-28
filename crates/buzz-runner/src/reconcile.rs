@@ -498,7 +498,9 @@ mod tests {
         store
             .upsert_desired(&agent, &desired(DeploymentDesiredState::Running, 1))
             .expect("desired");
-        store.put_secrets(&agent, 1, &secrets()).expect("secrets");
+        store
+            .put_secrets(&agent, 1, 1, &secrets())
+            .expect("secrets");
         let engine = FakeEngine::default();
         Reconciler::new(&store, &engine, &config, &"b".repeat(64), &"c".repeat(64))
             .reconcile_all(100)
@@ -531,7 +533,9 @@ mod tests {
         store
             .upsert_desired(&agent, &desired(DeploymentDesiredState::Running, 1))
             .expect("desired");
-        store.put_secrets(&agent, 1, &secrets()).expect("secrets");
+        store
+            .put_secrets(&agent, 1, 1, &secrets())
+            .expect("secrets");
         store
             .set_actual(&agent, 1, DeploymentActualState::Running, None, None)
             .expect("running");
@@ -549,7 +553,9 @@ mod tests {
         store
             .upsert_desired(&agent, &desired(DeploymentDesiredState::Running, 2))
             .expect("new generation");
-        store.put_secrets(&agent, 2, &secrets()).expect("secrets");
+        store
+            .put_secrets(&agent, 2, 2, &secrets())
+            .expect("secrets");
         *engine.state.lock().expect("state") = ContainerState::Missing;
         reconciler.reconcile_all(101).await.expect("restart");
         assert_eq!(

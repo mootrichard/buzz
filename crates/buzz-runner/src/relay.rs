@@ -135,19 +135,7 @@ async fn process_event(
                     secrets,
                 } => {
                     ensure_frame_agent(event, &agent_pubkey, "secrets_put")?;
-                    let desired = store
-                        .deployments()?
-                        .into_iter()
-                        .find(|deployment| deployment.agent_pubkey == agent_pubkey)
-                        .ok_or_else(|| {
-                            "secrets_put references an unknown deployment".to_string()
-                        })?;
-                    if desired.desired.generation != generation
-                        || desired.desired.secret_revision != secret_revision
-                    {
-                        return Err("secrets_put generation or revision is stale".into());
-                    }
-                    store.put_secrets(&agent_pubkey, secret_revision, &secrets)?;
+                    store.put_secrets(&agent_pubkey, generation, secret_revision, &secrets)?;
                     send_ack(
                         connection,
                         owner,

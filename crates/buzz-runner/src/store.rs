@@ -84,6 +84,14 @@ impl Store {
                    image TEXT NOT NULL,
                    image_digest TEXT,
                    updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS pending_provisioning (
+                   agent_pubkey TEXT PRIMARY KEY,
+                   generation INTEGER NOT NULL,
+                   secret_revision INTEGER NOT NULL,
+                   secret_nonce BLOB NOT NULL,
+                   secret_ciphertext BLOB NOT NULL,
+                   updated_at INTEGER NOT NULL
                  );",
             )
             .map_err(|error| format!("initialize runner SQLite: {error}"))?;
@@ -171,6 +179,9 @@ impl Store {
             .optional()
             .map_err(|error| format!("read desired generation: {error}"))?;
         if existing_generation.is_some_and(|generation| generation >= desired.generation) {
+            if existing_generation == Some(desired.generation) {
+                self.promote_pending_secrets(agent_pubkey, desired)?;
+            }
             return Ok(false);
         }
         let desired_json = serde_json::to_string(desired)
@@ -188,13 +199,16 @@ impl Store {
                 params![agent_pubkey, desired_json],
             )
             .map_err(|error| format!("write desired deployment: {error}"))?;
+        self.promote_pending_secrets(agent_pubkey, desired)?;
         Ok(true)
     }
 
-    /// Persist an encrypted secret revision.
+    /// Persist an encrypted secret revision, staging it when desired state has
+    /// not arrived yet.
     pub fn put_secrets(
         &self,
         agent_pubkey: &str,
+        generation: u64,
         revision: u64,
         secrets: &DeploymentSecrets,
     ) -> Result<(), String> {
@@ -211,17 +225,105 @@ impl Store {
         let ciphertext = cipher
             .encrypt(XNonce::from_slice(&nonce), plaintext.as_slice())
             .map_err(|_| "encrypt deployment secrets".to_string())?;
+        let desired: Option<(u64, u64)> = self
+            .connection
+            .query_row(
+                "SELECT json_extract(desired_json, '$.generation'),
+                        json_extract(desired_json, '$.secret_revision')
+                 FROM deployments WHERE agent_pubkey=?1",
+                params![agent_pubkey],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read desired secret coordinate: {error}"))?;
+
+        if let Some((desired_generation, desired_revision)) = desired {
+            if desired_generation == generation && desired_revision == revision {
+                self.connection
+                    .execute(
+                        "UPDATE deployments SET installed_secret_revision=?2,
+                           secret_nonce=?3, secret_ciphertext=?4, updated_at=unixepoch()
+                         WHERE agent_pubkey=?1",
+                        params![agent_pubkey, revision, nonce.as_slice(), ciphertext],
+                    )
+                    .map_err(|error| format!("write encrypted deployment secrets: {error}"))?;
+                self.connection
+                    .execute(
+                        "DELETE FROM pending_provisioning WHERE agent_pubkey=?1",
+                        params![agent_pubkey],
+                    )
+                    .map_err(|error| format!("clear pending deployment secrets: {error}"))?;
+                return Ok(());
+            }
+            if desired_generation >= generation {
+                return Err("secrets_put generation or revision is stale".into());
+            }
+        }
+
         let changed = self
             .connection
             .execute(
-                "UPDATE deployments SET installed_secret_revision=?2,
-                   secret_nonce=?3, secret_ciphertext=?4, updated_at=unixepoch()
-                 WHERE agent_pubkey=?1",
-                params![agent_pubkey, revision, nonce.as_slice(), ciphertext],
+                "INSERT INTO pending_provisioning(
+                   agent_pubkey, generation, secret_revision, secret_nonce,
+                   secret_ciphertext, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+                 ON CONFLICT(agent_pubkey) DO UPDATE SET
+                   generation=excluded.generation,
+                   secret_revision=excluded.secret_revision,
+                   secret_nonce=excluded.secret_nonce,
+                   secret_ciphertext=excluded.secret_ciphertext,
+                   updated_at=excluded.updated_at
+                 WHERE pending_provisioning.generation <= excluded.generation",
+                params![
+                    agent_pubkey,
+                    generation,
+                    revision,
+                    nonce.as_slice(),
+                    ciphertext
+                ],
             )
-            .map_err(|error| format!("write encrypted deployment secrets: {error}"))?;
+            .map_err(|error| format!("stage encrypted deployment secrets: {error}"))?;
         if changed != 1 {
-            return Err("deployment must exist before provisioning secrets".into());
+            return Err("secrets_put generation is stale".into());
+        }
+        Ok(())
+    }
+
+    fn promote_pending_secrets(
+        &self,
+        agent_pubkey: &str,
+        desired: &DeploymentDesiredPayload,
+    ) -> Result<(), String> {
+        let pending: Option<(u64, u64, Vec<u8>, Vec<u8>)> = self
+            .connection
+            .query_row(
+                "SELECT generation, secret_revision, secret_nonce, secret_ciphertext
+                 FROM pending_provisioning WHERE agent_pubkey=?1",
+                params![agent_pubkey],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|error| format!("read pending deployment secrets: {error}"))?;
+        let Some((generation, revision, nonce, ciphertext)) = pending else {
+            return Ok(());
+        };
+        if generation == desired.generation && revision == desired.secret_revision {
+            self.connection
+                .execute(
+                    "UPDATE deployments SET installed_secret_revision=?2,
+                       secret_nonce=?3, secret_ciphertext=?4, updated_at=unixepoch()
+                     WHERE agent_pubkey=?1",
+                    params![agent_pubkey, revision, nonce, ciphertext],
+                )
+                .map_err(|error| format!("promote pending deployment secrets: {error}"))?;
+        }
+        if generation <= desired.generation {
+            self.connection
+                .execute(
+                    "DELETE FROM pending_provisioning WHERE agent_pubkey=?1",
+                    params![agent_pubkey],
+                )
+                .map_err(|error| format!("clear pending deployment secrets: {error}"))?;
         }
         Ok(())
     }
@@ -266,6 +368,12 @@ impl Store {
                 params![agent_pubkey],
             )
             .map_err(|error| format!("delete deployment secrets: {error}"))?;
+        self.connection
+            .execute(
+                "DELETE FROM pending_provisioning WHERE agent_pubkey=?1",
+                params![agent_pubkey],
+            )
+            .map_err(|error| format!("delete pending deployment secrets: {error}"))?;
         Ok(())
     }
 
@@ -487,7 +595,7 @@ mod tests {
             environment: BTreeMap::from([("TOKEN".into(), "secret-token".into())]),
         };
         store
-            .put_secrets(&"a".repeat(64), 1, &secrets)
+            .put_secrets(&"a".repeat(64), 1, 1, &secrets)
             .expect("put secrets");
         assert_eq!(
             store.load_secrets(&"a".repeat(64)).expect("load"),
@@ -502,6 +610,39 @@ mod tests {
         let record = store.deployments().expect("records").remove(0);
         assert_eq!(record.stop_latch_generation, Some(1));
         assert_eq!(record.actual_state, DeploymentActualState::StoppedByAgent);
+    }
+
+    #[test]
+    fn secrets_received_before_desired_state_are_promoted_when_generation_arrives() {
+        let temp = tempfile::tempdir().expect("temp");
+        let store = Store::open(temp.path()).expect("store");
+        let agent = "b".repeat(64);
+        let secrets = DeploymentSecrets {
+            agent_private_key: "secret-key".into(),
+            auth_tag: "secret-auth".into(),
+            environment: BTreeMap::from([("TOKEN".into(), "secret-token".into())]),
+        };
+
+        store
+            .put_secrets(&agent, 7, 7, &secrets)
+            .expect("stage out-of-order secrets");
+        assert_eq!(
+            store.load_secrets(&agent).expect("load before desired"),
+            None
+        );
+        drop(store);
+        let store = Store::open(temp.path()).expect("reopen store");
+
+        store
+            .upsert_desired(&agent, &desired(7))
+            .expect("persist desired");
+
+        assert_eq!(
+            store.load_secrets(&agent).expect("load promoted secrets"),
+            Some(secrets)
+        );
+        let record = store.deployments().expect("records").remove(0);
+        assert_eq!(record.installed_secret_revision, Some(7));
     }
 
     #[test]

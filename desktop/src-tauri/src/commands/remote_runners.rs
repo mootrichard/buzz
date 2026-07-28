@@ -309,6 +309,13 @@ pub(crate) async fn refresh_remote_runner_statuses(
     let mut store = load_store(app)?;
     let owner = state.signing_keys()?;
     let owner_hex = owner.public_key().to_hex();
+    let runner_assignments = load_managed_agents(app)?
+        .into_iter()
+        .filter_map(|record| match record.backend {
+            BackendKind::Runner { runner_pubkey } => Some((record.pubkey, runner_pubkey)),
+            BackendKind::Local | BackendKind::Provider { .. } => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     let runner_pubkeys = store
         .runners
         .iter()
@@ -320,25 +327,31 @@ pub(crate) async fn refresh_remote_runner_statuses(
             &[
                 serde_json::json!({
                     "kinds": [KIND_RUNNER_STATUS],
-                    "authors": runner_pubkeys,
+                    "authors": runner_pubkeys.clone(),
                     "#p": [owner_hex],
                     "limit": 256
                 }),
                 serde_json::json!({
                     "kinds": [KIND_RUNNER_DEPLOYMENT_STATUS],
+                    "authors": runner_pubkeys,
                     "#p": [owner.public_key().to_hex()],
                     "limit": 1024
                 }),
             ],
         )
         .await?;
-        apply_status_events(&mut store, &owner, events);
+        apply_status_events(&mut store, &owner, events, &runner_assignments);
         save_store(app, &store)?;
     }
     Ok(())
 }
 
-fn apply_status_events(store: &mut RemoteRunnerStore, owner: &nostr::Keys, events: Vec<Event>) {
+fn apply_status_events(
+    store: &mut RemoteRunnerStore,
+    owner: &nostr::Keys,
+    events: Vec<Event>,
+    runner_assignments: &BTreeMap<String, String>,
+) {
     let current = now();
     for event in events {
         if event.kind.as_u16() as u32 == KIND_RUNNER_STATUS {
@@ -364,6 +377,13 @@ fn apply_status_events(store: &mut RemoteRunnerStore, owner: &nostr::Keys, event
             let Some(agent_pubkey) = single_tag(&event, "agent") else {
                 continue;
             };
+            let event_runner_pubkey = event.pubkey.to_hex();
+            if runner_assignments
+                .get(&agent_pubkey)
+                .is_none_or(|runner_pubkey| runner_pubkey != &event_runner_pubkey)
+            {
+                continue;
+            }
             let Ok(payload) = decrypt_runner_payload::<DeploymentStatusPayload>(owner, &event)
             else {
                 continue;
@@ -807,6 +827,8 @@ pub async fn purge_remote_runner_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core_pkg::runner::DeploymentActualState;
+    use nostr::Keys;
 
     #[test]
     fn pairing_uri_sas_matches_runner_derivation() {
@@ -834,5 +856,48 @@ mod tests {
             environment.get("MCP_HOOK_SERVERS").map(String::as_str),
             Some("*")
         );
+    }
+
+    #[test]
+    fn deployment_status_from_a_former_runner_cannot_replace_current_assignment() {
+        let owner = Keys::generate();
+        let former_runner = Keys::generate();
+        let current_runner = Keys::generate();
+        let agent_pubkey = Keys::generate().public_key().to_hex();
+        let status_event = |runner: &Keys, state: DeploymentActualState| {
+            let payload = DeploymentStatusPayload {
+                protocol_version: RUNNER_PROTOCOL_VERSION,
+                desired_generation: 4,
+                observed_generation: 4,
+                state,
+                last_error: None,
+                image_digest: None,
+            };
+            let content = encrypt_runner_payload(runner, &owner.public_key(), &payload)
+                .expect("encrypt status");
+            buzz_sdk_pkg::build_runner_deployment_status(
+                &owner.public_key().to_hex(),
+                &runner.public_key().to_hex(),
+                &agent_pubkey,
+                &content,
+            )
+            .expect("status builder")
+            .sign_with_keys(runner)
+            .expect("sign status")
+        };
+        let current = status_event(&current_runner, DeploymentActualState::Running);
+        let stale = status_event(&former_runner, DeploymentActualState::CrashLoop);
+        let assignments =
+            BTreeMap::from([(agent_pubkey.clone(), current_runner.public_key().to_hex())]);
+        let mut store = RemoteRunnerStore::default();
+
+        apply_status_events(&mut store, &owner, vec![current, stale], &assignments);
+
+        assert_eq!(store.deployments.len(), 1);
+        assert_eq!(
+            store.deployments[0].runner_pubkey,
+            current_runner.public_key().to_hex()
+        );
+        assert_eq!(store.deployments[0].deployment_state, "running");
     }
 }
