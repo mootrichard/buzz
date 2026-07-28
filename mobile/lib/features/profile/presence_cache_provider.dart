@@ -8,9 +8,8 @@ import '../../shared/relay/relay.dart';
 /// In-memory cache of other users' presence.
 ///
 /// Subscribes to kind:20001 presence events over the relay WebSocket for
-/// real-time updates. There is no longer a REST backstop — agents that
-/// publish presence purely over WS are fine, and TTL expiry will be handled
-/// by the relay-side `presence:true` filter extension when that lands.
+/// real-time updates and hydrates newly tracked users from relay-synthesized
+/// kind:40902 snapshots.
 class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   final Set<String> _tracked = {};
   void Function()? _presenceUnsub;
@@ -33,16 +32,32 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
   }
 
   /// Track presence for [pubkeys].
-  ///
-  /// Currently a no-op for the actual fetch — we rely on live kind:20001
-  /// events. The tracked set is still used to filter incoming events so the
-  /// cache doesn't grow unbounded.
   void track(List<String> pubkeys) {
     final normalized = pubkeys.map((pk) => pk.toLowerCase()).toList();
+    final newlyTracked = normalized
+        .where((pubkey) => !_tracked.contains(pubkey))
+        .toList();
     _tracked.addAll(normalized);
-    // TODO(presence): once the relay supports a `presence:true` filter
-    // extension, issue a one-shot fetch here for the latest known state per
-    // pubkey. Until then, presence is "online whenever they publish".
+    if (newlyTracked.isNotEmpty) {
+      unawaited(_hydratePresence(newlyTracked));
+    }
+  }
+
+  Future<void> _hydratePresence(List<String> pubkeys) async {
+    try {
+      final events = await ref.read(relaySessionProvider.notifier).queryRelay([
+        NostrFilter(
+          kinds: const [EventKind.presenceSnapshot],
+          authors: pubkeys,
+          limit: pubkeys.length,
+        ),
+      ]);
+      for (final event in events) {
+        _handlePresenceEvent(event, onlyIfAbsent: true);
+      }
+    } catch (error) {
+      debugPrint('[PresenceCacheNotifier] presence snapshot failed: $error');
+    }
   }
 
   /// Subscribe to kind:20001 presence events over WebSocket.
@@ -72,11 +87,12 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
     }
   }
 
-  void _handlePresenceEvent(NostrEvent event) {
-    final pubkey = event.pubkey.toLowerCase();
+  void _handlePresenceEvent(NostrEvent event, {bool onlyIfAbsent = false}) {
+    final pubkey = (event.getTagValue('p') ?? event.pubkey).toLowerCase();
     if (!_tracked.contains(pubkey)) return;
     final status = event.content;
     if (status != 'online' && status != 'away' && status != 'offline') return;
+    if (onlyIfAbsent && state.containsKey(pubkey)) return;
     if (state[pubkey] == status) return;
     final updated = Map<String, String>.from(state);
     updated[pubkey] = status;
