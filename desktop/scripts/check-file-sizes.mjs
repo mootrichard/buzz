@@ -178,6 +178,10 @@ const overrides = new Map([
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
   ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
+  // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
+  // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -378,15 +382,6 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
-  // at the bottom of the Profile settings page. Load-bearing UX feature;
-  // queued to split when ProfileSettingsCard is broken into sub-components.
-  // +20 lines: scroll-position save/restore across avatar editor open/close
-  // to prevent layout shift from the Sign Out section causing a viewport jump.
-  // +11 lines: signout-dev-webview-state — clear localStorage/sessionStorage
-  // on successful signOut() resolve so dev-build webview state doesn't survive
-  // a reset and vouch for the fresh key. Comment explains the race/redundancy.
-  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1044],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a
@@ -499,7 +494,15 @@ const overrides = new Map([
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
   // +8: install_shell_from pure seam extracted for deterministic testing.
-  ["src-tauri/src/commands/agent_discovery.rs", 1523],
+  // +287: is_powershell_command + install_powershell_command + build_install_command
+  // route PowerShell CLI installs natively on Windows (bypasses Git Bash PATH
+  // poisoning that resolved GNU tar instead of bsdtar → Codex install failure).
+  // Includes unit tests for detection, routing, and -Command body preservation.
+  // +16: test_powershell_command_goose_catalog_dequoted proves the \$→$ escape
+  // fix for the Goose Windows installer (PR #2680 interaction with #2750).
+  // +10: pass an explicit PATH through Codex adapter install planning so unit
+  // tests avoid the process-global login-shell PATH cache.
+  ["src-tauri/src/commands/agent_discovery.rs", 1836],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
