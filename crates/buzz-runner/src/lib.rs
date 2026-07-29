@@ -6,6 +6,8 @@
 pub mod config;
 /// Docker engine abstraction and hardened container specification.
 pub mod docker;
+/// Fail-closed filesystem helpers for private runner state.
+pub mod fs_security;
 /// Desired/actual-state reconciliation.
 pub mod reconcile;
 /// Relay control-plane loop.

@@ -1,15 +1,15 @@
 //! Desired/actual-state reconciliation.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use buzz_core::runner::{DeploymentActualState, DeploymentDesiredState, DeploymentSecrets};
 
 use crate::config::RunnerConfig;
 use crate::docker::{ContainerEngine, ContainerSpec, ContainerState};
+use crate::fs_security::{create_new_private, set_private_mode};
 use crate::store::{DeploymentRecord, Store};
 
 /// Failures before a deployment enters `crash_loop`.
@@ -305,7 +305,7 @@ fn materialize_secrets(
     }
     fs::create_dir_all(&directory)
         .map_err(|error| format!("create materialized secret directory: {error}"))?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+    set_private_mode(&directory, 0o700)
         .map_err(|error| format!("secure materialized secret directory: {error}"))?;
     assign_to_agent_user(&directory)?;
     let mut values = secrets.environment.clone();
@@ -317,16 +317,12 @@ fn materialize_secrets(
             return Err("secret environment contains an invalid variable name".into());
         }
         let path = directory.join(&name);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o400)
-            .open(&path)
+        let mut file = create_new_private(&path, 0o400)
             .map_err(|error| format!("create materialized secret file: {error}"))?;
         file.write_all(value.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|error| format!("persist materialized secret file: {error}"))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o400))
+        set_private_mode(&path, 0o400)
             .map_err(|error| format!("secure materialized secret file: {error}"))?;
         assign_to_agent_user(&path)?;
     }
@@ -511,17 +507,22 @@ mod tests {
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].cpu_limit, "2");
         assert_eq!(created[0].memory_limit, "4g");
-        let mode = fs::metadata(
-            config
-                .runtime_secrets_dir
-                .join(&agent)
-                .join("BUZZ_PRIVATE_KEY"),
-        )
-        .expect("secret metadata")
-        .permissions()
-        .mode()
-            & 0o777;
-        assert_eq!(mode, 0o400);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(
+                config
+                    .runtime_secrets_dir
+                    .join(&agent)
+                    .join("BUZZ_PRIVATE_KEY"),
+            )
+            .expect("secret metadata")
+            .permissions()
+            .mode()
+                & 0o777;
+            assert_eq!(mode, 0o400);
+        }
     }
 
     #[tokio::test]

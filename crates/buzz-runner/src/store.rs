@@ -1,8 +1,7 @@
 //! SQLite state and encrypted secret persistence.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use buzz_core::runner::{DeploymentActualState, DeploymentDesiredPayload, DeploymentSecrets};
@@ -11,6 +10,8 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
+
+use crate::fs_security::{create_new_private, set_private_mode};
 
 /// Persistent deployment record used by reconciliation.
 #[derive(Debug, Clone)]
@@ -526,12 +527,10 @@ impl Store {
 
 fn load_or_create_master_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
     if path.exists() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        set_private_mode(path, 0o600)
             .map_err(|error| format!("secure runner master key permissions: {error}"))?;
         let mut bytes = Zeroizing::new(Vec::new());
-        OpenOptions::new()
-            .read(true)
-            .open(path)
+        File::open(path)
             .and_then(|mut file| file.read_to_end(&mut bytes))
             .map_err(|error| format!("read runner master key: {error}"))?;
         let key: [u8; 32] = bytes
@@ -543,16 +542,12 @@ fn load_or_create_master_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, String>
 
     let mut key = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(&mut *key);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    let mut file = create_new_private(path, 0o600)
         .map_err(|error| format!("create runner master key: {error}"))?;
     file.write_all(&*key)
         .and_then(|_| file.sync_all())
         .map_err(|error| format!("persist runner master key: {error}"))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    set_private_mode(path, 0o600)
         .map_err(|error| format!("secure runner master key permissions: {error}"))?;
     Ok(key)
 }
@@ -646,7 +641,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn master_key_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
         let temp = tempfile::tempdir().expect("temp");
         Store::open(temp.path()).expect("store");
         let mode = fs::metadata(temp.path().join("master.key"))

@@ -1054,9 +1054,12 @@ jobs:
           MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
         run: |
           set -euo pipefail
-          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          # mesh-llm-sdk is a root-workspace dependency, not a dependency of
+          # the standalone desktop crate. Fetch the root lockfile so a cold
+          # macOS runner always has the pinned checkout.
+          cargo fetch --locked
           SHORT="$MESH_REV_SHORT"
-          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" -print -quit)
           if [[ -z "$MESH_ROOT" ]]; then
             echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
             exit 1

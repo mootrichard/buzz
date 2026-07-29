@@ -1,13 +1,13 @@
 #![deny(unsafe_code)]
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use buzz_core::runner::RUNNER_PROTOCOL_VERSION;
 use buzz_runner::config::RunnerConfig;
 use buzz_runner::docker::DockerCli;
+use buzz_runner::fs_security::{create_new_private, set_private_mode};
 use buzz_runner::relay::run_control_loop;
 use buzz_runner::store::Store;
 use clap::{Parser, Subcommand};
@@ -186,12 +186,10 @@ fn purge(store: &Store, agent_pubkey: &str) -> Result<(), String> {
 
 fn load_or_create_runner_keys(path: &Path) -> Result<Keys, String> {
     if path.exists() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        set_private_mode(path, 0o600)
             .map_err(|error| format!("secure runner identity permissions: {error}"))?;
         let mut secret = Zeroizing::new(String::new());
-        OpenOptions::new()
-            .read(true)
-            .open(path)
+        File::open(path)
             .and_then(|mut file| file.read_to_string(&mut secret))
             .map_err(|error| format!("read runner identity: {error}"))?;
         let key = SecretKey::from_hex(secret.trim())
@@ -200,11 +198,7 @@ fn load_or_create_runner_keys(path: &Path) -> Result<Keys, String> {
     }
     let keys = Keys::generate();
     let secret_hex = Zeroizing::new(hex::encode(keys.secret_key().as_secret_bytes()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    let mut file = create_new_private(path, 0o600)
         .map_err(|error| format!("create runner identity: {error}"))?;
     file.write_all(secret_hex.as_bytes())
         .and_then(|_| file.sync_all())
