@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 use super::agent_env::build_buzz_agent_provider_defaults;
+pub(crate) use super::agent_env::runtime_metadata_env_vars;
 
 use crate::{
     managed_agents::{
@@ -2159,32 +2160,6 @@ pub fn start_managed_agent_process(
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
-}
-
-/// Returns the (key, value) env var pairs that should be forwarded to the
-/// agent process for model and provider selection.
-///
-/// Model injection is unconditional — even agents that support ACP model
-/// switching need the initial bootstrap value. Provider injection is skipped
-/// when `provider_locked` is true (e.g. Claude runtimes that only work with
-/// Anthropic).
-pub(crate) fn runtime_metadata_env_vars<'a>(
-    model_env_var: Option<&'a str>,
-    provider_env_var: Option<&'a str>,
-    provider_locked: bool,
-    effective_model: Option<&'a str>,
-    effective_provider: Option<&'a str>,
-) -> Vec<(&'a str, &'a str)> {
-    let mut vars = Vec::new();
-    if let (Some(env_key), Some(model)) = (model_env_var, effective_model) {
-        vars.push((env_key, model));
-    }
-    if !provider_locked {
-        if let (Some(env_key), Some(provider)) = (provider_env_var, effective_provider) {
-            vars.push((env_key, provider));
-        }
-    }
-    vars
 }
 
 /// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.
