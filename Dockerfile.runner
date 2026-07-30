@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.7
+ARG RUST_VERSION=1.95
+ARG DEBIAN_VERSION=bookworm
+
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+WORKDIR /build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --release --locked -p buzz-runner \
+    && strip target/release/buzz-runner
+
+FROM debian:${DEBIAN_VERSION}-slim
+LABEL org.opencontainers.image.title="Buzz Runner" \
+      org.opencontainers.image.description="Always-on Docker supervisor for Buzz agents" \
+      org.opencontainers.image.source="https://github.com/block/buzz"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates docker.io \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/buzz-runner /usr/local/bin/buzz-runner
+WORKDIR /var/lib/buzz-runner
+ENTRYPOINT ["/usr/local/bin/buzz-runner"]
+CMD ["run"]

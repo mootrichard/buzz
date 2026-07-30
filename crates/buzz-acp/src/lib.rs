@@ -90,6 +90,73 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Track channels whose turns just started and wake the typing publisher now.
+///
+/// The refresh interval keeps long-running turns visible, but waiting for its
+/// next three-second tick makes fast turns look idle after the immediate
+/// reaction acknowledgement. Resetting the interval whenever dispatch starts
+/// work guarantees the next main-loop iteration publishes the first typing
+/// indicator without adding a blocking relay write to the dispatch path.
+fn register_typing_channels(
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    typing_refresh: Option<&mut tokio::time::Interval>,
+    dispatched: impl IntoIterator<Item = (Uuid, ThreadTags)>,
+) {
+    let mut registered = false;
+    for (channel_id, thread_tags) in dispatched {
+        typing_channels.insert(channel_id, thread_tags);
+        registered = true;
+    }
+    if registered {
+        if let Some(interval) = typing_refresh {
+            interval.reset_immediately();
+        }
+    }
+}
+
+#[cfg(test)]
+mod typing_registration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_wakes_typing_refresh_immediately() {
+        let refresh_every = Duration::from_secs(30);
+        let mut refresh =
+            tokio::time::interval_at(tokio::time::Instant::now() + refresh_every, refresh_every);
+        let channel_id = Uuid::new_v4();
+        let mut channels = HashMap::new();
+
+        register_typing_channels(
+            &mut channels,
+            Some(&mut refresh),
+            [(channel_id, ThreadTags::default())],
+        );
+
+        assert!(channels.contains_key(&channel_id));
+        tokio::time::timeout(Duration::from_millis(50), refresh.tick())
+            .await
+            .expect("dispatch should wake the typing refresh immediately");
+    }
+
+    #[tokio::test]
+    async fn no_dispatch_keeps_typing_refresh_on_its_existing_schedule() {
+        let refresh_every = Duration::from_secs(30);
+        let mut refresh =
+            tokio::time::interval_at(tokio::time::Instant::now() + refresh_every, refresh_every);
+        let mut channels = HashMap::new();
+
+        register_typing_channels(&mut channels, Some(&mut refresh), std::iter::empty());
+
+        assert!(channels.is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), refresh.tick())
+                .await
+                .is_err(),
+            "an empty dispatch must not wake the typing refresh"
+        );
+    }
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -1473,7 +1540,13 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    config::allow_untagged_direct_messages(
+        &mut channel_filters,
+        channel_info_map
+            .iter()
+            .filter_map(|(channel_id, info)| (info.channel_type == "dm").then_some(*channel_id)),
+    );
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1775,9 +1848,8 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
-                }
+                let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                register_typing_channels(&mut typing_channels, typing_refresh.as_mut(), dispatched);
             }
         }
 
@@ -1811,9 +1883,8 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                typing_channels.insert(channel_id, thread_tags);
-            }
+            let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+            register_typing_channels(&mut typing_channels, typing_refresh.as_mut(), dispatched);
         }
 
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
@@ -1967,7 +2038,15 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        if ctx
+                                            .channel_info
+                                            .resolve(ch)
+                                            .await
+                                            .is_some_and(|info| info.channel_type == "dm")
+                                        {
+                                            filter.require_mention = false;
+                                        }
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -2258,11 +2337,12 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
                             if pool_ready {
-                                for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx)
-                                {
-                                    typing_channels.insert(channel_id, thread_tags);
-                                }
+                                let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                                register_typing_channels(
+                                    &mut typing_channels,
+                                    typing_refresh.as_mut(),
+                                    dispatched,
+                                );
                             }
                         }
                         None => {
@@ -2287,11 +2367,12 @@ async fn tokio_main() -> Result<()> {
                         tracing::debug!("heartbeat_skipped_pool_not_ready");
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
-                        {
-                            typing_channels.insert(channel_id, thread_tags);
-                        }
+                        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                        register_typing_channels(
+                            &mut typing_channels,
+                            typing_refresh.as_mut(),
+                            dispatched,
+                        );
                     } else if pool.any_idle() {
                         dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
                     } else {
@@ -2386,9 +2467,8 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
-                }
+                let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                register_typing_channels(&mut typing_channels, typing_refresh.as_mut(), dispatched);
             }
             Some(PoolEvent::Panic(join_error)) => {
                 tracing::error!("agent task panicked: {join_error}");
@@ -2409,9 +2489,8 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
-                }
+                let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                register_typing_channels(&mut typing_channels, typing_refresh.as_mut(), dispatched);
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
@@ -2529,9 +2608,8 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
-                    typing_channels.insert(channel_id, thread_tags);
-                }
+                let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                register_typing_channels(&mut typing_channels, typing_refresh.as_mut(), dispatched);
             }
             Some(PoolEvent::Wake(attempt, result)) => {
                 let completion = result.as_ref().map(|_| ()).map_err(|error| error.clone());
@@ -2555,11 +2633,12 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
-                        {
-                            typing_channels.insert(channel_id, thread_tags);
-                        }
+                        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+                        register_typing_channels(
+                            &mut typing_channels,
+                            typing_refresh.as_mut(),
+                            dispatched,
+                        );
                     }
                     Err(error) => {
                         debug_assert_eq!(pool_lifecycle.failed_error(), Some(error.as_str()));

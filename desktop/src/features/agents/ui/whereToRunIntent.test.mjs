@@ -51,6 +51,18 @@ test("local draft resolves to null intent", () => {
   assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
 });
 
+test("runner draft resolves without provider probing", () => {
+  const runner = {
+    ...emptyWhereToRunDraft,
+    runOn: `runner:${"ab".repeat(32)}`,
+  };
+  assert.equal(canSubmitWhereToRun(runner), true);
+  assert.deepEqual(resolveBackendIntent(runner), {
+    type: "runner",
+    runnerPubkey: "ab".repeat(32),
+  });
+});
+
 test("provider draft resolves with coerced config values", () => {
   const intent = resolveBackendIntent(providerDraft());
   assert.deepEqual(intent, {

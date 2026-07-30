@@ -15,6 +15,7 @@ web/dist/
 # VCS, IDE, scratch
 .git/
 .github/
+.hermit/
 .gitignore
 .gitattributes
 .vscode/

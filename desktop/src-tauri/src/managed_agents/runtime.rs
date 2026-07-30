@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 use super::agent_env::build_buzz_agent_provider_defaults;
+pub(crate) use super::agent_env::runtime_metadata_env_vars;
 
 use crate::{
     managed_agents::{
@@ -1402,10 +1403,10 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
-        } else {
-            "not_deployed".to_string()
+        let status = match record.backend {
+            BackendKind::Runner { .. } => "stopped".to_string(),
+            _ if record.backend_agent_id.is_some() => "deployed".to_string(),
+            _ => "not_deployed".to_string(),
         };
         (status, None, String::new())
     } else {
@@ -1474,7 +1475,8 @@ pub fn build_managed_agent_summary(
                 super::adapter_availability_cached(),
             );
             hash_drift || availability_drift
-        });
+        })
+        || crate::commands::remote_restart_required(app, record);
 
     // Resolve the effective harness the same way, then derive args/mcp from it,
     // so the UI reflects the persona's current harness (or an explicit pin).
@@ -1484,6 +1486,9 @@ pub fn build_managed_agent_summary(
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
         .to_string();
+
+    let (runner_id, desired_generation, observed_generation, deployment_state, last_runner_error) =
+        crate::commands::remote_summary(app, record);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -1510,6 +1515,11 @@ pub fn build_managed_agent_summary(
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
+        runner_id,
+        desired_generation,
+        observed_generation,
+        deployment_state,
+        last_runner_error,
         status,
         pid,
         created_at: record.created_at.clone(),
@@ -2150,32 +2160,6 @@ pub fn start_managed_agent_process(
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
-}
-
-/// Returns the (key, value) env var pairs that should be forwarded to the
-/// agent process for model and provider selection.
-///
-/// Model injection is unconditional — even agents that support ACP model
-/// switching need the initial bootstrap value. Provider injection is skipped
-/// when `provider_locked` is true (e.g. Claude runtimes that only work with
-/// Anthropic).
-pub(crate) fn runtime_metadata_env_vars<'a>(
-    model_env_var: Option<&'a str>,
-    provider_env_var: Option<&'a str>,
-    provider_locked: bool,
-    effective_model: Option<&'a str>,
-    effective_provider: Option<&'a str>,
-) -> Vec<(&'a str, &'a str)> {
-    let mut vars = Vec::new();
-    if let (Some(env_key), Some(model)) = (model_env_var, effective_model) {
-        vars.push((env_key, model));
-    }
-    if !provider_locked {
-        if let (Some(env_key), Some(provider)) = (provider_env_var, effective_provider) {
-            vars.push((env_key, provider));
-        }
-    }
-    vars
 }
 
 /// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.

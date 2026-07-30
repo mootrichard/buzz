@@ -10,6 +10,9 @@ pub enum BackendKind {
         id: String,
         config: serde_json::Value,
     },
+    Runner {
+        runner_pubkey: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -502,6 +505,11 @@ pub struct ManagedAgentSummary {
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
+    pub runner_id: Option<String>,
+    pub desired_generation: Option<u64>,
+    pub observed_generation: Option<u64>,
+    pub deployment_state: Option<String>,
+    pub last_runner_error: Option<String>,
     pub status: String,
     pub pid: Option<u32>,
     pub created_at: String,

@@ -726,6 +726,10 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
+    /// Optional OpenAI function whose availability requires a tool call on the
+    /// first provider request of each user turn. Subsequent requests return to
+    /// automatic tool selection.
+    pub openai_initial_tool: Option<String>,
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
@@ -798,6 +802,9 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
+            openai_initial_tool: env("BUZZ_AGENT_OPENAI_INITIAL_TOOL")
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
@@ -844,6 +851,7 @@ impl Config {
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            openai_initial_tool: None,
             max_rounds: 0,
             max_output_tokens: 1,
             llm_timeout: Duration::from_secs(30),

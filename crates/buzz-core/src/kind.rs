@@ -126,7 +126,14 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER, KIND_PUSH_LEASE];
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_RUNNER_REGISTRATION,
+    KIND_RUNNER_DEPLOYMENT,
+    KIND_RUNNER_STATUS,
+    KIND_RUNNER_DEPLOYMENT_STATUS,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -145,6 +152,11 @@ pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_MET
 /// storage-layer search defense does not apply to them.
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_RUNNER_FRAME,
+    KIND_RUNNER_REGISTRATION,
+    KIND_RUNNER_DEPLOYMENT,
+    KIND_RUNNER_STATUS,
+    KIND_RUNNER_DEPLOYMENT_STATUS,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
@@ -257,6 +269,15 @@ pub const KIND_TEAM: u32 = 30176;
 /// carry the agent's secret key, NIP-OA auth tag, env vars, or runtime fields,
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
+
+/// NIP-AR: owner-authored runner registration or revocation head.
+pub const KIND_RUNNER_REGISTRATION: u32 = 30178;
+/// NIP-AR: owner-authored encrypted deployment desired-state head.
+pub const KIND_RUNNER_DEPLOYMENT: u32 = 30179;
+/// NIP-AR: runner-authored encrypted capability and status head.
+pub const KIND_RUNNER_STATUS: u32 = 30180;
+/// NIP-AR: runner-authored encrypted per-agent deployment status head.
+pub const KIND_RUNNER_DEPLOYMENT_STATUS: u32 = 30181;
 
 // NIP-56 reporting
 /// NIP-56: Report an event, pubkey, or blob to relay moderators (kind:1984).
@@ -407,6 +428,8 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// NIP-AR: encrypted ephemeral provisioning, acknowledgement, or heartbeat frame.
+pub const KIND_RUNNER_FRAME: u32 = 24201;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -586,6 +609,10 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_RUNNER_REGISTRATION,
+    KIND_RUNNER_DEPLOYMENT,
+    KIND_RUNNER_STATUS,
+    KIND_RUNNER_DEPLOYMENT_STATUS,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -627,6 +654,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_RUNNER_FRAME,
     KIND_HTTP_AUTH,
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
@@ -784,6 +812,10 @@ const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_RUNNER_REGISTRATION));
+const _: () = assert!(is_parameterized_replaceable(KIND_RUNNER_DEPLOYMENT));
+const _: () = assert!(is_parameterized_replaceable(KIND_RUNNER_STATUS));
+const _: () = assert!(is_parameterized_replaceable(KIND_RUNNER_DEPLOYMENT_STATUS));
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

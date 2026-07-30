@@ -17,7 +17,10 @@ import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  canRestartManagedAgent,
+  getManagedAgentPrimaryActionLabel,
+} from "@/features/agents/lib/managedAgentControlActions";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -374,9 +377,8 @@ export function ProfileSummaryView({
           }
           onAgentRestart={
             isOwner === true &&
-            managedAgent?.backend.type === "local" &&
-            (managedAgent.status === "running" ||
-              managedAgent.status === "deployed")
+            managedAgent !== undefined &&
+            canRestartManagedAgent(managedAgent)
               ? handleAgentRestart
               : undefined
           }

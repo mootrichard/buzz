@@ -1,4 +1,4 @@
-use super::{AgentDefinition, ManagedAgentRecord};
+use super::{AgentDefinition, BackendKind, ManagedAgentRecord};
 use std::path::PathBuf;
 
 #[test]
@@ -647,5 +647,19 @@ fn mint_rejects_out_of_range_input_parallelism() {
     assert!(
         !err.contains("definition"),
         "input-branch error must not blame the definition: {err}"
+    );
+}
+
+#[test]
+fn runner_backend_wire_shape_preserves_legacy_tagging_contract() {
+    let backend = BackendKind::Runner {
+        runner_pubkey: "ab".repeat(32),
+    };
+    let encoded = serde_json::to_value(&backend).expect("serialize runner backend");
+    assert_eq!(encoded["type"], "runner");
+    assert_eq!(encoded["runner_pubkey"], "ab".repeat(32));
+    assert_eq!(
+        serde_json::from_value::<BackendKind>(encoded).expect("deserialize runner backend"),
+        backend
     );
 }

@@ -2,7 +2,8 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
-import { probeBackendProvider } from "@/shared/api/tauri";
+import { listRemoteRunners, probeBackendProvider } from "@/shared/api/tauri";
+import { useQuery } from "@tanstack/react-query";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
 import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
@@ -11,15 +12,24 @@ import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
 export function WhereToRunSection({
   draft,
   isPending,
+  runtimeId,
   onDraftChange,
 }: {
   draft: WhereToRunDraft;
   isPending: boolean;
+  runtimeId?: string;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
   const backendProviders = useBackendProvidersQuery().data ?? [];
+  const remoteRunners =
+    useQuery({
+      queryKey: ["remote-runners"],
+      queryFn: listRemoteRunners,
+      refetchInterval: 15_000,
+    }).data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
-  const isProviderMode = draft.runOn !== "local";
+  const isRunnerMode = draft.runOn.startsWith("runner:");
+  const isProviderMode = draft.runOn !== "local" && !isRunnerMode;
   const selectedBackendProvider = React.useMemo(
     () =>
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
@@ -63,7 +73,7 @@ export function WhereToRunSection({
     };
   }, [draft, isProviderMode, onDraftChange, selectedBackendProvider]);
 
-  if (backendProviders.length === 0) return null;
+  if (backendProviders.length === 0 && remoteRunners.length === 0) return null;
 
   return (
     <div className="space-y-4">
@@ -84,6 +94,23 @@ export function WhereToRunSection({
           value={draft.runOn}
         >
           <option value="local">This computer</option>
+          {remoteRunners.map((runner) => (
+            <option
+              disabled={
+                !runner.online ||
+                (runtimeId != null && !runner.runtimes.includes(runtimeId))
+              }
+              key={runner.runnerPubkey}
+              value={`runner:${runner.runnerPubkey}`}
+            >
+              {runner.name}{" "}
+              {!runner.online
+                ? "(offline)"
+                : runtimeId != null && !runner.runtimes.includes(runtimeId)
+                  ? "(runtime unavailable)"
+                  : ""}
+            </option>
+          ))}
           {backendProviders.map((provider) => (
             <option key={provider.id} value={provider.id}>
               {provider.id}

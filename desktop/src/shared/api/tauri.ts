@@ -37,6 +37,7 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import type { RemoteRunner } from "@/shared/api/remoteRunnerTypes";
 
 export * from "@/shared/api/tauriChannels";
 
@@ -151,6 +152,11 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
+  runner_id?: string | null;
+  desired_generation?: number | null;
+  observed_generation?: number | null;
+  deployment_state?: string | null;
+  last_runner_error?: string | null;
   // Optional: pre-feature mock fixtures may omit these. Mapped to
   // `"owner-only"` / `[]` in `fromRawManagedAgent`.
   respond_to?: ManagedAgent["respondTo"];
@@ -720,6 +726,11 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
+    runnerId: agent.runner_id ?? null,
+    desiredGeneration: agent.desired_generation ?? null,
+    observedGeneration: agent.observed_generation ?? null,
+    deploymentState: agent.deployment_state ?? null,
+    lastRunnerError: agent.last_runner_error ?? null,
     // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
     // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
@@ -845,6 +856,46 @@ export async function listManagedAgents(): Promise<ManagedAgent[]> {
   return (await invokeTauri<RawManagedAgent[]>("list_managed_agents")).map(
     fromRawManagedAgent,
   );
+}
+
+export async function listRemoteRunners(): Promise<RemoteRunner[]> {
+  return invokeTauri<RemoteRunner[]>("list_remote_runners");
+}
+
+export async function getRemoteRunnerProtocolVersion(): Promise<number | null> {
+  return invokeTauri("get_remote_runner_protocol_version");
+}
+
+export async function inspectRemoteRunnerPairingUri(
+  uri: string,
+): Promise<string> {
+  return invokeTauri("inspect_remote_runner_pairing_uri", { uri });
+}
+
+export async function pairRemoteRunner(
+  uri: string,
+  confirmedSas: string,
+  name?: string,
+): Promise<RemoteRunner> {
+  return invokeTauri("pair_remote_runner", {
+    uri,
+    confirmedSas,
+    name: name ?? null,
+  });
+}
+
+export async function revokeRemoteRunner(runnerPubkey: string): Promise<void> {
+  await invokeTauri("revoke_remote_runner", { runnerPubkey });
+}
+
+export async function purgeRemoteRunnerWorkspace(
+  runnerPubkey: string,
+  agentPubkey: string,
+): Promise<void> {
+  await invokeTauri("purge_remote_runner_workspace", {
+    runnerPubkey,
+    agentPubkey,
+  });
 }
 export async function createManagedAgent(input: CreateManagedAgentInput) {
   const response = await invokeTauri<RawCreateManagedAgentResponse>(

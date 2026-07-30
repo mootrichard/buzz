@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startManagedAgentWithRules } from "./managedAgentControlActions.ts";
+import {
+  canRestartManagedAgent,
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentActive,
+  respawnManagedAgentWithRules,
+  shouldStartManagedAgentForMention,
+  startManagedAgentWithRules,
+} from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
   return {
@@ -76,4 +83,92 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("runner activity is derived from container state, not legacy deployed status", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+  assert.equal(isManagedAgentActive(runner), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(runner), "Stop");
+  assert.equal(
+    getManagedAgentPrimaryActionLabel({
+      ...runner,
+      deploymentState: "stopped_by_agent",
+    }),
+    "Start",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel({
+      ...runner,
+      deploymentState: "runner_offline",
+    }),
+    "Start",
+  );
+});
+
+test("active runner deployments expose the same restart action as local agents", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+
+  assert.equal(canRestartManagedAgent(runner), true);
+  assert.equal(
+    canRestartManagedAgent({
+      ...runner,
+      deploymentState: "stopped_by_owner",
+    }),
+    false,
+  );
+  assert.equal(
+    canRestartManagedAgent({
+      ...runner,
+      backend: { type: "provider", id: "cloud", config: {} },
+      status: "deployed",
+      deploymentState: null,
+    }),
+    false,
+  );
+});
+
+test("mentioning an active runner deployment does not publish another start generation", () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+
+  assert.equal(shouldStartManagedAgentForMention(runner), false);
+  assert.equal(
+    shouldStartManagedAgentForMention({
+      ...runner,
+      deploymentState: "stopped_by_owner",
+    }),
+    true,
+  );
+});
+
+test("restarting a runner publishes one new desired generation without stopping first", async () => {
+  const runner = agent({
+    backend: { type: "runner", runner_pubkey: "ab".repeat(32) },
+    status: "stopped",
+    deploymentState: "running",
+  });
+  const calls = [];
+
+  await respawnManagedAgentWithRules({
+    agent: runner,
+    startManagedAgent: async (pubkey) => {
+      calls.push(`start:${pubkey}`);
+    },
+    stopManagedAgent: async (pubkey) => {
+      calls.push(`stop:${pubkey}`);
+    },
+  });
+
+  assert.deepEqual(calls, [`start:${runner.pubkey}`]);
 });

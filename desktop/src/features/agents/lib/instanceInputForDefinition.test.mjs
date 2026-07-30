@@ -224,6 +224,24 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
   assert.equal(input.systemPrompt, "prompt");
 });
 
+test("runner intent preserves the catalog runtime but never enables local auto-start", async () => {
+  const runnerPubkey = "ab".repeat(32);
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "runner", runnerPubkey },
+  );
+  assert.deepEqual(input.backend, {
+    type: "runner",
+    runner_pubkey: runnerPubkey,
+  });
+  assert.equal(input.agentCommand, "goose-cmd");
+  assert.deepEqual(input.agentArgs, ["--acp"]);
+  assert.equal(input.startOnAppLaunch, false);
+  assert.equal(input.spawnAfterCreate, true);
+});
+
 test("row 1: refuses when the configured runtime is not available", () => {
   assert.throws(
     () =>

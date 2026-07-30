@@ -17,6 +17,7 @@ export const emptyWhereToRunDraft: WhereToRunDraft = {
 
 export function providerConfigComplete(draft: WhereToRunDraft): boolean {
   if (draft.runOn === "local") return true;
+  if (draft.runOn.startsWith("runner:")) return true;
   if (!draft.probedProvider) return false;
   const schema = draft.probedProvider.config_schema as
     | Record<string, unknown>
@@ -35,6 +36,12 @@ export function resolveBackendIntent(
   draft: WhereToRunDraft,
 ): BackendIntent | null {
   if (draft.runOn === "local") return null;
+  if (draft.runOn.startsWith("runner:")) {
+    return {
+      type: "runner",
+      runnerPubkey: draft.runOn.slice("runner:".length),
+    };
+  }
   return {
     type: "provider",
     id: draft.runOn,

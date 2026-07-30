@@ -27,6 +27,7 @@ import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastE
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export function ManagedAgentRow({
   agent,
@@ -57,7 +58,11 @@ export function ManagedAgentRow({
 }) {
   const isLocal = agent.backend.type === "local";
   const runtimeSource =
-    agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
+    agent.backend.type === "provider"
+      ? `Remote (${agent.backend.id})`
+      : agent.backend.type === "runner"
+        ? `Runner (${truncatePubkey(agent.backend.runner_pubkey)})`
+        : null;
   const personaLabel = agent.personaId
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
@@ -129,6 +134,8 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                deploymentState={agent.deploymentState}
+                lastRunnerError={agent.lastRunnerError}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -152,6 +159,8 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                deploymentState={agent.deploymentState}
+                lastRunnerError={agent.lastRunnerError}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -349,6 +358,8 @@ function StatusBlock({
   presenceStatus,
   processDetail,
   status,
+  deploymentState,
+  lastRunnerError,
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
@@ -356,6 +367,8 @@ function StatusBlock({
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
   status: ManagedAgent["status"];
+  deploymentState: string | null;
+  lastRunnerError: string | null;
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
@@ -365,6 +378,7 @@ function StatusBlock({
         presenceLoaded={presenceLoaded}
         presenceStatus={presenceStatus}
         status={status}
+        deploymentState={deploymentState}
       />
       <p className="text-xs text-muted-foreground">{processDetail}</p>
       {friendlyError ? (
@@ -378,6 +392,12 @@ function StatusBlock({
           data-testid="managed-agent-last-error"
         >
           {friendlyError.copy}
+        </p>
+      ) : null}
+      {lastRunnerError || deploymentState === "crash_loop" ? (
+        <p className="text-xs text-destructive">
+          {lastRunnerError ??
+            "The runner stopped restarting this agent after repeated crashes."}
         </p>
       ) : null}
     </div>

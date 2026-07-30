@@ -124,6 +124,7 @@ function AgentCreateDialogRouter({
         <WhereToRunSection
           draft={runDraft}
           isPending={isDefinitionPending}
+          runtimeId={initialValues.runtime}
           onDraftChange={setRunDraft}
         />
       }

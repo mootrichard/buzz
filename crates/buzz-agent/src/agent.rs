@@ -5,7 +5,9 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
+use crate::config::{
+    Config, Provider, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
 use crate::handoff::HandoffOutcome;
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
@@ -20,6 +22,19 @@ use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+fn initial_tool_response_required(
+    cfg: &Config,
+    round: u32,
+    tools: &[crate::types::ToolDef],
+) -> bool {
+    round == 1
+        && matches!(cfg.provider, Provider::OpenAi | Provider::Databricks)
+        && cfg
+            .openai_initial_tool
+            .as_ref()
+            .is_some_and(|name| tools.iter().any(|tool| tool.name == *name))
+}
 
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
@@ -202,6 +217,17 @@ impl RunCtx<'_> {
                     ),
                 )
                 .await;
+            }
+
+            let required_initial_tool_missing =
+                initial_tool_response_required(self.cfg, round, &tools)
+                    && response.tool_calls.is_empty();
+            if required_initial_tool_missing {
+                return Err(AgentError::Llm(
+                    "provider ignored the required initial tool call; refusing to end the turn \
+                     with an invisible assistant-only response"
+                        .into(),
+                ));
             }
 
             if response.tool_calls.is_empty() {
@@ -742,5 +768,31 @@ fn map_stop(p: ProviderStop) -> StopReason {
         ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
         ProviderStop::MaxTokens => StopReason::MaxTokens,
         ProviderStop::Refusal => StopReason::Refusal,
+    }
+}
+
+#[cfg(test)]
+mod initial_tool_tests {
+    use super::*;
+    use crate::types::ToolDef;
+
+    fn tool() -> ToolDef {
+        ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn initial_tool_response_requirement_only_applies_to_openai_shaped_providers() {
+        let mut anthropic =
+            Config::for_discovery(Provider::Anthropic, String::new(), String::new());
+        anthropic.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        assert!(!initial_tool_response_required(&anthropic, 1, &[tool()]));
+
+        let mut openai = Config::for_discovery(Provider::OpenAi, String::new(), String::new());
+        openai.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        assert!(initial_tool_response_required(&openai, 1, &[tool()]));
     }
 }
