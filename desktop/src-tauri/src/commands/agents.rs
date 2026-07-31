@@ -6,19 +6,23 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        load_teams, normalize_agent_args, provider_deploy, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
 
-/// Read the workspace owner pubkey without holding the lock. Used to populate `BUZZ_ACP_AGENT_OWNER`
+#[path = "agents_create_helpers.rs"]
+mod create_helpers;
+use create_helpers::{normalize_relay_mesh, resolve_created_avatar_url, trim_to_optional_string};
+
+/// Read the workspace owner's pubkey hex from app state without holding the
+/// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -199,51 +203,6 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-archive: {e}");
     }
-}
-
-fn normalize_relay_mesh(
-    config: Option<&RelayMeshConfig>,
-    backend: &BackendKind,
-) -> Result<Option<RelayMeshConfig>, String> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
-
-    let model_ref = config.model_ref.trim();
-    if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
-    }
-    if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
-    }
-
-    Ok(Some(RelayMeshConfig {
-        model_ref: model_ref.to_string(),
-    }))
-}
-
-fn trim_to_optional_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn resolve_created_avatar_url(
-    requested_avatar_url: Option<&str>,
-    persona_avatar_url: Option<String>,
-    agent_command: &str,
-) -> Option<String> {
-    requested_avatar_url
-        .and_then(trim_to_optional_string)
-        .or_else(|| {
-            persona_avatar_url
-                .as_deref()
-                .and_then(trim_to_optional_string)
-        })
-        .or_else(|| managed_agent_avatar_url(agent_command))
 }
 
 #[cfg(feature = "mesh-llm")]
@@ -521,7 +480,13 @@ async fn deploy_to_provider(
 // from the owned AppHandle inside the closure because `State<'_, _>` is borrowed
 // and `std::sync::MutexGuard` is not `Send`.
 #[tauri::command]
-pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSummary>, String> {
+pub async fn list_managed_agents(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedAgentSummary>, String> {
+    crate::commands::refresh_remote_runner_statuses(&app, &state)
+        .await
+        .ok();
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -1019,6 +984,11 @@ pub async fn create_managed_agent(
                 Ok(()) => spawn_error,
                 Err(e) => Some(e),
             }
+        } else if let BackendKind::Runner { .. } = input.backend {
+            match crate::commands::deploy_new_remote_agent(&app, &state, &pubkey).await {
+                Ok(()) => spawn_error,
+                Err(error) => Some(error),
+            }
         } else {
             spawn_error
         }
@@ -1068,6 +1038,9 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    if let Some(summary) = crate::commands::try_start_remote_agent(&app, &state, &pubkey).await? {
+        return Ok(summary);
+    }
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
@@ -1122,14 +1095,14 @@ pub async fn start_managed_agent(
             persona_id: record.persona_id.clone(),
         };
 
-        let target = if record.backend == BackendKind::Local {
-            StartTarget::Local
-        } else {
-            StartTarget::Provider {
+        let target = match &record.backend {
+            BackendKind::Local => StartTarget::Local,
+            BackendKind::Runner { .. } => return Err("runner backend dispatch failed".to_string()),
+            BackendKind::Provider { .. } => StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
                 agent_json: build_deploy_payload(&app, &state, record)?,
-            }
+            },
         };
 
         (target, reconcile)
@@ -1216,7 +1189,11 @@ pub async fn start_managed_agent(
 pub async fn stop_managed_agent(
     pubkey: String,
     app: AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    if let Some(summary) = crate::commands::try_stop_remote_agent(&app, &state, &pubkey).await? {
+        return Ok(summary);
+    }
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -1277,7 +1254,15 @@ pub async fn delete_managed_agent(
     pubkey: String,
     force_remote_delete: Option<bool>,
     app: AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
+    crate::commands::prepare_remote_agent_delete(
+        &app,
+        &state,
+        &pubkey,
+        force_remote_delete.unwrap_or(false),
+    )
+    .await?;
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();

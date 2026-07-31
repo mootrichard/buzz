@@ -1323,6 +1323,22 @@ pub fn resolve_channel_filters(
     result
 }
 
+/// Allow direct-message events through without an explicit `p` mention while
+/// preserving the configured mention requirement for every other channel.
+///
+/// DM membership already defines the private audience, and some older clients
+/// publish DM events without redundant recipient tags.
+pub(crate) fn allow_untagged_direct_messages(
+    filters: &mut HashMap<Uuid, ChannelFilter>,
+    direct_message_channels: impl IntoIterator<Item = Uuid>,
+) {
+    for channel_id in direct_message_channels {
+        if let Some(filter) = filters.get_mut(&channel_id) {
+            filter.require_mention = false;
+        }
+    }
+}
+
 /// Resolve the subscription filter for a single dynamically-discovered channel.
 ///
 /// In Mentions/All mode, `channels_override` (--channels) is enforced — the agent
@@ -1510,6 +1526,19 @@ mod tests {
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
+    }
+
+    #[test]
+    fn direct_messages_do_not_require_explicit_mentions() {
+        let config = test_config(SubscribeMode::Mentions);
+        let dm_channel = Uuid::new_v4();
+        let stream_channel = Uuid::new_v4();
+        let mut result = resolve_channel_filters(&config, &[dm_channel, stream_channel], &[]);
+
+        allow_untagged_direct_messages(&mut result, [dm_channel]);
+
+        assert!(!result[&dm_channel].require_mention);
+        assert!(result[&stream_channel].require_mention);
     }
 
     #[test]

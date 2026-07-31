@@ -736,6 +736,10 @@ pub struct Config {
     /// `BUZZ_AGENT_PREFER_MESH_FOR_AUTO=1`; other providers keep their
     /// existing `auto` semantics.
     pub prefer_mesh_for_auto: bool,
+    /// Optional OpenAI function whose availability requires a tool call on the
+    /// first provider request of each user turn. Subsequent requests return to
+    /// automatic tool selection.
+    pub openai_initial_tool: Option<String>,
     pub hints_enabled: bool,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
@@ -828,6 +832,9 @@ impl Config {
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
             prefer_mesh_for_auto: parse_env("BUZZ_AGENT_PREFER_MESH_FOR_AUTO", 0u8)? != 0,
+            openai_initial_tool: env("BUZZ_AGENT_OPENAI_INITIAL_TOOL")
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
@@ -876,6 +883,7 @@ impl Config {
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
             prefer_mesh_for_auto: false,
+            openai_initial_tool: None,
             max_rounds: 0,
             max_output_tokens: 1,
             llm_timeout: Duration::from_secs(30),

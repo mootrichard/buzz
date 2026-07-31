@@ -319,8 +319,7 @@ export type ManagedAgentRuntimeStatus = {
 };
 
 export type ManagedAgentBackend =
-  | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
+  import("@/shared/api/remoteRunnerTypes").ManagedAgentBackend;
 
 export type ManagedAgent = {
   pubkey: string;
@@ -398,7 +397,7 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
-};
+} & import("@/shared/api/remoteRunnerTypes").RemoteManagedAgentState;
 
 /**
  * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.

@@ -4,14 +4,31 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-/// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
+/// Tests for [PresenceCacheNotifier]'s relay-backed presence cache.
 ///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
+/// The notifier hydrates tracked pubkeys from kind:40902 snapshots, then keeps
+/// them current with live kind:20001 updates.
 void main() {
+  test('cold cache hydrates tracked presence from relay snapshot', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [_presenceSnapshot('alice', 'online')],
+    );
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
+
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+    expect(relaySession.queryFilters, hasLength(1));
+    expect(relaySession.queryFilters.single.kinds, [
+      EventKind.presenceSnapshot,
+    ]);
+    expect(relaySession.queryFilters.single.authors, ['alice']);
+  });
+
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
@@ -143,6 +160,18 @@ NostrEvent _presence(String pubkey, String status) => NostrEvent(
   sig: 'sig',
 );
 
+NostrEvent _presenceSnapshot(String pubkey, String status) => NostrEvent(
+  id: 'snapshot-$pubkey-$status',
+  pubkey: 'relay-pubkey',
+  createdAt: 1000,
+  kind: EventKind.presenceUpdate,
+  tags: [
+    ['p', pubkey],
+  ],
+  content: status,
+  sig: 'sig',
+);
+
 Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
@@ -160,8 +189,12 @@ ProviderContainer _buildContainer({
 }
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
+  _RecordingRelaySessionNotifier({this.queryResults = const []});
+
   final List<NostrFilter> filters = [];
+  final List<NostrFilter> queryFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  final List<NostrEvent> queryResults;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -178,6 +211,15 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       filters.remove(filter);
       _listeners.remove(onEvent);
     };
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
+    return queryResults;
   }
 
   /// Emit an event synchronously to all live subscribers.

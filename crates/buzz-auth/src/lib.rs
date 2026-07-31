@@ -77,6 +77,11 @@ pub struct AuthContext {
     /// `None` for direct relay members or non-NIP-OA auth paths.
     /// Set by the relay membership gate when NIP-OA fallback succeeds.
     pub agent_owner_pubkey: Option<nostr::PublicKey>,
+    /// Owner of a NIP-AR restricted runner session.
+    ///
+    /// Set only after the relay resolves the active kind:30182 registration
+    /// referenced by the NIP-42 auth event.
+    pub runner_owner_pubkey: Option<nostr::PublicKey>,
 }
 
 impl AuthContext {
@@ -139,6 +144,7 @@ impl AuthService {
             channel_ids: None,
             auth_method: AuthMethod::Nip42,
             agent_owner_pubkey: None, // Set later by relay membership gate if NIP-OA
+            runner_owner_pubkey: None, // Set later by relay after registration lookup
         })
     }
 }
@@ -191,6 +197,7 @@ mod tests {
             channel_ids: None,
             auth_method: AuthMethod::Nip42,
             agent_owner_pubkey: None,
+            runner_owner_pubkey: None,
         };
         assert!(ctx.has_scope(&Scope::MessagesRead));
         assert!(!ctx.has_scope(&Scope::MessagesWrite));

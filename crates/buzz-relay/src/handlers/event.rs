@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_RUNNER_DEPLOYMENT,
+    KIND_RUNNER_DEPLOYMENT_STATUS, KIND_RUNNER_FRAME, KIND_RUNNER_REGISTRATION, KIND_RUNNER_STATUS,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -145,6 +146,28 @@ pub async fn filter_fanout_by_access(
                     .conn_manager
                     .pubkey_for_conn(*conn_id)
                     .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    // Result-gated global events are visible only to their author or addressed
+    // recipient, depending on the kind. This covers NIP-AR runner heads as
+    // well as the existing owner-private snapshots.
+    let matches = if buzz_core::kind::RESULT_GATED_KINDS
+        .contains(&event_kind_u32(&stored_event.event))
+    {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .map(hex::encode)
+                    .is_some_and(|reader| {
+                        buzz_core::filter::reader_authorized_for_event(&stored_event.event, &reader)
+                    })
             })
             .collect()
     } else {
@@ -290,6 +313,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     };
     let community_id = channel_event.community_id;
     let stored = StoredEvent::new(channel_event.event, channel_id);
+    enforce_runner_revocation(state, community_id, &stored.event);
 
     // Skip events that were already fanned out in-process (local echo). The
     // dedup key is `(community_id, event_id)` — a same-id event arriving for a
@@ -409,6 +433,7 @@ async fn dispatch_persistent_event_inner(
     // surfaces as `ReadMessageRows` observations on the subscriber side
     // (read seam in req.rs, emitted by the held-back read-seam diff).
     let event_id_hex = stored_event.event.id.to_hex();
+    enforce_runner_revocation(state, tenant.community(), &stored_event.event);
 
     let topic = match stored_event.channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
@@ -560,6 +585,21 @@ async fn dispatch_persistent_event_inner(
     matches.len()
 }
 
+fn enforce_runner_revocation(state: &AppState, community: CommunityId, event: &Event) {
+    if let Ok(super::runner_protocol::RunnerEventRoute::Registration {
+        runner,
+        state: buzz_core::runner::RunnerRegistrationState::Revoked,
+    }) = super::runner_protocol::validate_runner_event(event)
+    {
+        state.conn_manager.disconnect_pubkey(
+            community,
+            runner.as_bytes(),
+            &event.id.to_hex(),
+            "restricted: runner registration revoked",
+        );
+    }
+}
+
 async fn enqueue_event_created_audit(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -631,7 +671,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     )
     .increment(1);
 
-    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
+    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids, runner_owner) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => (
@@ -640,6 +680,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 ctx.pubkey,
                 ctx.scopes.clone(),
                 ctx.channel_ids.clone(),
+                ctx.runner_owner_pubkey,
             ),
             _ => {
                 reject("auth");
@@ -675,6 +716,100 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             "invalid: AUTH events cannot be submitted via EVENT",
         ));
         return;
+    }
+
+    let is_runner_kind = matches!(
+        kind_u32,
+        KIND_RUNNER_REGISTRATION
+            | KIND_RUNNER_DEPLOYMENT
+            | KIND_RUNNER_STATUS
+            | KIND_RUNNER_DEPLOYMENT_STATUS
+            | KIND_RUNNER_FRAME
+    );
+    if runner_owner.is_some() && !is_runner_kind {
+        reject("scope");
+        conn.send(RelayMessage::ok(
+            &event_id_hex,
+            false,
+            "restricted: runner sessions cannot publish this event kind",
+        ));
+        return;
+    }
+
+    if is_runner_kind {
+        let route = match super::runner_protocol::authorize_runner_event(
+            &state.db,
+            conn.tenant.community(),
+            &event,
+        )
+        .await
+        {
+            Ok(route) => route,
+            Err(reason) => {
+                reject("auth");
+                conn.send(RelayMessage::ok(&event_id_hex, false, &reason));
+                return;
+            }
+        };
+        let session_role_matches = match (&runner_owner, &route) {
+            (
+                Some(owner),
+                super::runner_protocol::RunnerEventRoute::RunnerStatus {
+                    owner: recipient,
+                    runner,
+                },
+            )
+            | (
+                Some(owner),
+                super::runner_protocol::RunnerEventRoute::DeploymentStatus {
+                    owner: recipient,
+                    runner,
+                    ..
+                },
+            ) => *owner == *recipient && *runner == auth_pubkey,
+            (
+                Some(owner),
+                super::runner_protocol::RunnerEventRoute::Frame {
+                    recipient, runner, ..
+                },
+            ) => *owner == *recipient && *runner == auth_pubkey,
+            (None, super::runner_protocol::RunnerEventRoute::Registration { .. })
+            | (None, super::runner_protocol::RunnerEventRoute::Deployment { .. }) => true,
+            (
+                None,
+                super::runner_protocol::RunnerEventRoute::Frame {
+                    recipient,
+                    runner,
+                    frame,
+                    ..
+                },
+            ) => {
+                *recipient == *runner && matches!(frame.as_str(), "secrets_put" | "purge_workspace")
+            }
+            _ => false,
+        };
+        if !session_role_matches {
+            reject("scope");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: runner protocol direction does not match authenticated role",
+            ));
+            return;
+        }
+        if kind_u32 == KIND_RUNNER_FRAME {
+            handle_ephemeral_event(
+                event,
+                conn_id,
+                &event_id_hex,
+                pubkey_bytes,
+                auth_pubkey,
+                conn,
+                state,
+            )
+            .await;
+            return;
+        }
     }
 
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
@@ -864,36 +999,39 @@ async fn handle_ephemeral_event(
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
         fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     } else {
-        // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
-        //
-        // Sentinel pattern: we use `Uuid::nil()` (all-zeros UUID) as a
-        // "global channel" routing key in Redis pub/sub. This lets other relay
-        // nodes receive and fan out these events without any real channel_id.
-        // The nil UUID is ONLY a Redis routing key — it never reaches the DB.
-        // On the receiving end (main.rs subscriber loop), `is_nil()` is checked
-        // and converted back to `None` so `fan_out()` uses the global index.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Global, &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers through the guarded send path.
-        // Pass channel_id=None so fan_out() uses the global subscriber index;
-        // filter_fanout_by_access no-ops for channel-less events except the
-        // author-only-kind gate.
-        let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        dispatch_global_ephemeral_event(&state, &conn.tenant, &event).await;
     }
 
     conn.send(RelayMessage::ok(event_id_hex, true, ""));
+}
+
+/// Publish an already-verified channel-less ephemeral event without storing it.
+///
+/// WebSocket EVENT messages and owner-authenticated HTTP runner provisioning
+/// both use this seam. The nil global Redis topic is converted back to
+/// `channel_id = None` by subscribers, and direct local fan-out avoids waiting
+/// for the Redis round trip.
+pub(crate) async fn dispatch_global_ephemeral_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &Event,
+) {
+    let event_id_hex = event.id.to_hex();
+    state.mark_local_event(tenant.community(), &event.id);
+
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Global, event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+    }
+
+    let stored_event = StoredEvent::new(event.clone(), None);
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1393,6 +1531,7 @@ mod tests {
                     channel_ids: None,
                     auth_method: buzz_auth::AuthMethod::Nip42,
                     agent_owner_pubkey: None,
+                    runner_owner_pubkey: None,
                 },
             )),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),

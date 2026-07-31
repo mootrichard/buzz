@@ -42,6 +42,9 @@ jobs:
               - 'schema/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'Dockerfile.agent'
+              - 'Dockerfile.runner'
+              - 'docker-compose.yml'
               - 'rust-toolchain.toml'
               - 'deny.toml'
               - '.github/workflows/ci.yml'
@@ -129,6 +132,25 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Unit tests
         run: just test-unit
+
+  remote-runner-docker:
+    name: Remote Runner Docker E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Runner supervisor tests
+        run: cargo test -p buzz-runner
+      - name: Docker security integration
+        run: cargo test -p buzz-runner --test docker_integration -- --ignored
 
   desktop-core:
     name: Desktop Core
@@ -1056,9 +1078,12 @@ jobs:
           MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
         run: |
           set -euo pipefail
-          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          # mesh-llm-sdk is a root-workspace dependency, not a dependency of
+          # the standalone desktop crate. Fetch the root lockfile so a cold
+          # macOS runner always has the pinned checkout.
+          cargo fetch --locked
           SHORT="$MESH_REV_SHORT"
-          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" -print -quit)
           if [[ -z "$MESH_ROOT" ]]; then
             echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
             exit 1

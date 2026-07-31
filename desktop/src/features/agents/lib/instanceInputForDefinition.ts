@@ -82,11 +82,16 @@ export function resolveStartRuntimeForDefinition(
  *   is true because the preset commands deliberately override the
  *   definition's runtime preference.
  */
-export type BackendIntent = {
-  type: "provider";
-  id: string;
-  config: Record<string, unknown>;
-};
+export type BackendIntent =
+  | {
+      type: "provider";
+      id: string;
+      config: Record<string, unknown>;
+    }
+  | {
+      type: "runner";
+      runnerPubkey: string;
+    };
 
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
@@ -135,6 +140,23 @@ export async function buildInstanceInputForDefinition(
         type: "provider",
         id: backendIntent.id,
         config: backendIntent.config,
+      },
+    };
+  }
+
+  if (backendIntent?.type === "runner") {
+    return {
+      ...base,
+      agentCommand: runtime.command,
+      agentArgs: runtime.defaultArgs,
+      harnessOverride: !persona.runtime || persona.runtime === runtime.id,
+      model: persona.model ?? undefined,
+      provider: persona.provider ?? undefined,
+      spawnAfterCreate: true,
+      startOnAppLaunch: false,
+      backend: {
+        type: "runner",
+        runner_pubkey: backendIntent.runnerPubkey,
       },
     };
   }

@@ -870,6 +870,8 @@ fn openai_body(
     effective_model: &str,
     effort: Option<ThinkingEffort>,
 ) -> Value {
+    let initial_tool = openai_initial_tool(cfg, history, tools);
+    let system_prompt = initial_tool_system_prompt(system_prompt, initial_tool);
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
     // Images returned from tool calls ride on a trailing `role:"user"`
     // message because OpenAI Chat's `role:"tool"` content is text-only. We
@@ -956,9 +958,41 @@ fn openai_body(
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
-        body["tool_choice"] = json!("auto");
+        body["tool_choice"] = match initial_tool {
+            Some(name) => json!({
+                "type": "function",
+                "function": {"name": name},
+            }),
+            None => json!("auto"),
+        };
     }
     body
+}
+
+fn openai_initial_tool<'a>(
+    cfg: &'a Config,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+) -> Option<&'a str> {
+    cfg.openai_initial_tool.as_deref().filter(|name| {
+        matches!(history.last(), Some(HistoryItem::User(_)))
+            && tools.iter().any(|tool| tool.name == *name)
+    })
+}
+
+fn initial_tool_system_prompt(system_prompt: &str, initial_tool: Option<&str>) -> String {
+    match initial_tool {
+        Some(name) => format!(
+            "{system_prompt}\n\n\
+             [Required first action]\n\
+             Normal assistant text from this first round is not delivered to the user. \
+             You MUST call `{name}`. The tool call itself must perform the user-visible \
+             action; do not merely echo, print, or describe what should happen. For a Buzz \
+             reply, execute `buzz messages send` with the channel and reply destination from \
+             the user context."
+        ),
+        None => system_prompt.to_string(),
+    }
 }
 
 fn openai_tool_text_content(content: &[ToolResultContent]) -> String {
@@ -1003,6 +1037,8 @@ fn responses_body(
     effective_model: &str,
     effort: Option<ThinkingEffort>,
 ) -> Value {
+    let initial_tool = openai_initial_tool(cfg, history, tools);
+    let system_prompt = initial_tool_system_prompt(system_prompt, initial_tool);
     let mut input: Vec<Value> = Vec::with_capacity(history.len());
     for item in history {
         match item {
@@ -1079,7 +1115,13 @@ fn responses_body(
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
-        body["tool_choice"] = json!("auto");
+        body["tool_choice"] = match initial_tool {
+            Some(name) => json!({
+                "type": "function",
+                "name": name,
+            }),
+            None => json!("auto"),
+        };
     }
     body
 }
@@ -2362,6 +2404,7 @@ mod tests {
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
             prefer_mesh_for_auto: false,
+            openai_initial_tool: None,
             hints_enabled: true,
             thinking_effort: None,
             prompt_caching: true,
@@ -3067,6 +3110,102 @@ mod tests {
             "Responses tool schema is flat"
         );
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn openai_body_forces_configured_tool_and_explains_delivery_on_first_round() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        let tools = vec![ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = openai_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("reply in Buzz".into())],
+            &tools,
+            "model",
+            None,
+        );
+
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "buzz-dev-mcp__shell"},
+            })
+        );
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Normal assistant text"));
+        assert!(system.contains("execute `buzz messages send`"));
+    }
+
+    #[test]
+    fn openai_body_returns_to_auto_after_forced_tool_result() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        let tools = vec![ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let history = vec![
+            HistoryItem::User("reply in Buzz".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_1".into(),
+                    name: "buzz-dev-mcp__shell".into(),
+                    arguments: serde_json::json!({"command": "buzz messages send"}),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_1".into(),
+                content: vec![ToolResultContent::Text("accepted".into())],
+                is_error: false,
+            }),
+        ];
+
+        let body = openai_body(&cfg, "system", &history, &tools, "model", None);
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["messages"][0]["content"], "system");
+    }
+
+    #[test]
+    fn responses_body_forces_configured_tool_on_first_round() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+        let tools = vec![ToolDef {
+            name: "buzz-dev-mcp__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("reply in Buzz".into())],
+            &tools,
+            "model",
+            None,
+        );
+
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "name": "buzz-dev-mcp__shell",
+            })
+        );
+        assert!(body["instructions"]
+            .as_str()
+            .is_some_and(|value| value.contains("Required first action")));
     }
 
     #[test]

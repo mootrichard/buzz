@@ -235,6 +235,12 @@ class ThreadDetailPage extends HookConsumerWidget {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
       }
     });
+    final currentChannel = channelsAsync.value
+        ?.where((channel) => channel.id == channelId)
+        .firstOrNull;
+    final audiencePubkeys = currentChannel?.isDm == true
+        ? currentChannel!.participantPubkeys
+        : const <String>[];
 
     return FrostedScaffold(
       appBar: const FrostedAppBar(
@@ -407,6 +413,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                         channelId: channelId,
                         content: content,
                         mentionPubkeys: mentionPubkeys,
+                        audiencePubkeys: audiencePubkeys,
                         parentEventId: threadHead.id,
                         rootEventId: effectiveRootId,
                         mediaTags: mediaTags,

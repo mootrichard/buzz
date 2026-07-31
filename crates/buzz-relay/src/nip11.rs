@@ -43,6 +43,8 @@ pub struct RelayInfo {
     /// NIP-PL executor descriptor. Present only when push delivery is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push: Option<serde_json::Value>,
+    /// Buzz-specific protocol versions supported by this relay.
+    pub buzz: BuzzProtocolInfo,
     /// URL of the relay software repository.
     pub software: String,
     /// Relay software version string.
@@ -85,6 +87,13 @@ pub struct RelayLimitation {
     /// NIP-ER: maximum allowed `not_before` horizon in seconds from now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_not_before_delta: Option<u64>,
+}
+
+/// Buzz extension protocol versions advertised through NIP-11.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuzzProtocolInfo {
+    /// NIP-AR remote runner protocol version.
+    pub remote_runner_protocol: u16,
 }
 
 /// Canonical `RelayLimitation` advertised by this relay.
@@ -162,8 +171,11 @@ impl RelayInfo {
             pubkey: None,
             contact: None,
             supported_nips,
-            supported_extensions: Some(vec!["nip-er".to_string()]),
+            supported_extensions: Some(vec!["nip-er".to_string(), "nip-ar".to_string()]),
             push: None,
+            buzz: BuzzProtocolInfo {
+                remote_runner_protocol: buzz_core::runner::RUNNER_PROTOCOL_VERSION,
+            },
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation(max_message_length)),

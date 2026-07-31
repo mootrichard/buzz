@@ -76,6 +76,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
+    // NIP-AR runner authentication uses an `a` tag that references the
+    // owner-authored registration. This is only trusted after NIP-42 verifies
+    // the event signature below.
+    let runner_owner_reference =
+        super::runner_protocol::runner_owner_from_auth_event(&event, &event.pubkey);
 
     let relay_url =
         crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
@@ -90,6 +95,56 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
+            let runner_owner = match runner_owner_reference {
+                Ok(Some(owner)) => {
+                    match super::runner_protocol::registration_is_active(
+                        &state.db,
+                        conn.tenant.community(),
+                        &owner,
+                        &pubkey,
+                    )
+                    .await
+                    {
+                        Ok(true) => Some(owner),
+                        Ok(false) => {
+                            warn!(conn_id = %conn_id, runner = %pubkey.to_hex(), owner = %owner.to_hex(),
+                                  "runner registration is missing, stale, or revoked");
+                            metrics::counter!("buzz_auth_failures_total", "reason" => "runner_registration")
+                                .increment(1);
+                            *conn.auth_state.write().await = AuthState::Failed;
+                            conn.send(RelayMessage::ok(
+                                &event_id_hex,
+                                false,
+                                "restricted: runner registration is not active",
+                            ));
+                            return;
+                        }
+                        Err(error) => {
+                            warn!(conn_id = %conn_id, runner = %pubkey.to_hex(), error,
+                                  "runner registration lookup failed");
+                            *conn.auth_state.write().await = AuthState::Failed;
+                            conn.send(RelayMessage::ok(
+                                &event_id_hex,
+                                false,
+                                "error: runner registration lookup failed",
+                            ));
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    warn!(conn_id = %conn_id, runner = %pubkey.to_hex(), error,
+                          "malformed runner registration reference");
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        "invalid: malformed runner registration reference",
+                    ));
+                    return;
+                }
+            };
 
             // Community ban gate (NIP-42 seam). Runs immediately after auth
             // verification succeeds and before the allowlist and relay-membership
@@ -134,10 +189,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 // is clear (a DB error already denies; a direct ban already blocks
                 // — both skip the needless second DB read).
                 if matches!(outcome, BanOutcome::Clear) {
-                    if let Some(owner) = crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                    ) {
+                    let delegated_owner = runner_owner.or_else(|| {
+                        crate::api::relay_members::extract_nip_oa_owner(
+                            pubkey.as_bytes(),
+                            auth_tag_json.as_deref(),
+                        )
+                    });
+                    if let Some(owner) = delegated_owner {
                         outcome = match state
                             .db
                             .moderation_restriction_state(conn.tenant.community(), owner.as_bytes())
@@ -186,6 +244,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // Pubkey allowlist gate — only for pubkey-only auth.
             if state.config.pubkey_allowlist_enabled
                 && auth_ctx.auth_method == buzz_auth::AuthMethod::Nip42
+                && runner_owner.is_none()
             {
                 let allowed = match state
                     .db
@@ -214,26 +273,30 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
 
             // Relay membership gate — uses the shared helper with NIP-OA fallback.
-            let nip_oa_owner = match crate::api::relay_members::enforce_relay_membership(
-                &state,
-                conn.tenant.community(),
-                pubkey.as_bytes(),
-                auth_tag_json.as_deref(),
-            )
-            .await
-            {
-                Ok(owner) => owner,
-                Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
-                    metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
-                        .increment(1);
-                    *conn.auth_state.write().await = AuthState::Failed;
-                    conn.send(RelayMessage::ok(
-                        &event_id_hex,
-                        false,
-                        "restricted: not a relay member",
-                    ));
-                    return;
+            let nip_oa_owner = if runner_owner.is_some() {
+                None
+            } else {
+                match crate::api::relay_members::enforce_relay_membership(
+                    &state,
+                    conn.tenant.community(),
+                    pubkey.as_bytes(),
+                    auth_tag_json.as_deref(),
+                )
+                .await
+                {
+                    Ok(owner) => owner,
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
+                        metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
+                            .increment(1);
+                        *conn.auth_state.write().await = AuthState::Failed;
+                        conn.send(RelayMessage::ok(
+                            &event_id_hex,
+                            false,
+                            "restricted: not a relay member",
+                        ));
+                        return;
+                    }
                 }
             };
 
@@ -273,6 +336,8 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     );
                 }
             }
+
+            auth_ctx.runner_owner_pubkey = runner_owner;
 
             info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);

@@ -1,16 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BackendKind {
-    #[default]
-    Local,
-    Provider {
-        id: String,
-        config: serde_json::Value,
-    },
-}
+mod backend;
+pub use backend::BackendKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -552,6 +544,11 @@ pub struct ManagedAgentSummary {
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
+    pub runner_id: Option<String>,
+    pub desired_generation: Option<u64>,
+    pub observed_generation: Option<u64>,
+    pub deployment_state: Option<String>,
+    pub last_runner_error: Option<String>,
     pub status: String,
     pub pid: Option<u32>,
     pub created_at: String,

@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +879,7 @@ mod tests {
         assert!(!strip_sql_comments(ttl_shared)
             .to_lowercase()
             .contains("for update"));
+
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
 
         // Use-limited invite links: durable relay_invites table stores only
@@ -919,6 +920,18 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // NIP-AR durable runner control-plane events are encrypted and must
+        // remain invisible to full-text search. This fork migration follows
+        // upstream's relay-invites and replica-heartbeat migrations.
+        assert_eq!(migrations[26].version, 27);
+        let runner_fts = migrations[26].sql.as_str();
+        for kind in [30179, 30180, 30181, 30182] {
+            assert!(
+                runner_fts.contains(&kind.to_string()),
+                "runner FTS migration must exclude kind {kind}"
+            );
+        }
     }
 
     #[test]
@@ -1161,7 +1174,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(26));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
     }
 
     #[tokio::test]

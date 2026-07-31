@@ -2484,3 +2484,50 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toBeVisible();
 });
+
+test("runner-backed agents can be restarted from their profile", async ({
+  page,
+}) => {
+  const agentPubkey = TEST_IDENTITIES.alice.pubkey;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: agentPubkey,
+        name: "Frame",
+        status: "deployed",
+        needsRestart: true,
+        backend: {
+          type: "runner",
+          runner_pubkey: "ab".repeat(32),
+        },
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId(`managed-agent-${agentPubkey}`).click();
+
+  const restart = page.getByTestId("user-profile-agent-restart");
+  await expect(restart).toBeVisible();
+  await expect(restart).toHaveAccessibleName("Restart");
+  await restart.click();
+
+  const lifecycleCommands = await page.evaluate(() =>
+    (
+      window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+        (entry) =>
+          entry.command === "start_managed_agent" ||
+          entry.command === "stop_managed_agent",
+      ) ?? []
+    ).map((entry) => ({
+      command: entry.command,
+      payload: entry.payload,
+    })),
+  );
+  expect(lifecycleCommands).toEqual([
+    {
+      command: "start_managed_agent",
+      payload: { pubkey: agentPubkey },
+    },
+  ]);
+});

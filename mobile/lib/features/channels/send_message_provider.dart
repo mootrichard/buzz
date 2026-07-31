@@ -39,12 +39,18 @@ class SendMessage {
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
   /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  ///
+  /// [audiencePubkeys] is the persistent audience for a direct-message
+  /// channel. Unlike explicit mentions, these recipients are tagged even when
+  /// their names do not appear in [content], allowing mention-filtered clients
+  /// and agents to receive every DM.
   Future<void> call({
     required String channelId,
     required String content,
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    List<String> audiencePubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -58,7 +64,7 @@ class SendMessage {
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in [...resolvedMentions, ...audiencePubkeys])
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 

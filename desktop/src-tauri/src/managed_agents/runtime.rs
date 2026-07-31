@@ -22,8 +22,8 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
-    SESSION_TITLE_ENV_VAR,
+    resolve_effective_prompt_model_provider, resolve_session_title, restart_eligible,
+    runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -162,10 +162,10 @@ pub fn build_managed_agent_summary(
         // (infrastructure still exists). This is intentional — the provider may
         // have allocated a VM/container that persists across process restarts.
         // A future provider `undeploy` operation (v2) will handle teardown.
-        let status = if record.backend_agent_id.is_some() {
-            "deployed".to_string()
-        } else {
-            "not_deployed".to_string()
+        let status = match record.backend {
+            BackendKind::Runner { .. } => "stopped".to_string(),
+            _ if record.backend_agent_id.is_some() => "deployed".to_string(),
+            _ => "not_deployed".to_string(),
         };
         (status, None, String::new())
     } else {
@@ -268,7 +268,8 @@ pub fn build_managed_agent_summary(
             // an action guaranteed to fail; the UI shows `persona_orphaned`
             // instead (see `ManagedAgentSummary::persona_orphaned`).
             restart_eligible(persona_orphaned, hash_drift, availability_drift)
-        });
+        })
+        || crate::commands::remote_restart_required(app, record);
 
     // Resolve the effective harness via the single typed descriptor — same resolver
     // as spawn, so the UI reflects the persona's current harness (or explicit pin).
@@ -297,6 +298,9 @@ pub fn build_managed_agent_summary(
         .unwrap_or("")
         .to_string();
 
+    let (runner_id, desired_generation, observed_generation, deployment_state, last_runner_error) =
+        crate::commands::remote_summary(app, record);
+
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -324,6 +328,11 @@ pub fn build_managed_agent_summary(
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
+        runner_id,
+        desired_generation,
+        observed_generation,
+        deployment_state,
+        last_runner_error,
         status,
         pid,
         created_at: record.created_at.clone(),
@@ -339,19 +348,6 @@ pub fn build_managed_agent_summary(
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
-}
-
-/// Pure predicate: should the "Restart required" badge fire?
-///
-/// An orphaned linked instance (its persona/definition no longer exists)
-/// can never be restarted successfully — `spawn_agent_child` refuses to
-/// spawn it before any process side effect. Surfacing "Restart required"
-/// for one would offer an action guaranteed to fail, so this always
-/// returns `false` for an orphan regardless of drift. Extracted for unit
-/// testing without `AppHandle`/global state, following the
-/// `availability_drift` pattern in `discovery.rs`.
-fn restart_eligible(persona_orphaned: bool, hash_drift: bool, availability_drift: bool) -> bool {
-    !persona_orphaned && (hash_drift || availability_drift)
 }
 
 pub fn find_managed_agent_mut<'a>(

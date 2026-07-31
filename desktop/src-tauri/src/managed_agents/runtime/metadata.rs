@@ -24,6 +24,16 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
     vars
 }
 
+/// Whether a live, non-orphaned instance has configuration drift that can be
+/// repaired by restarting it.
+pub(crate) fn restart_eligible(
+    persona_orphaned: bool,
+    hash_drift: bool,
+    availability_drift: bool,
+) -> bool {
+    !persona_orphaned && (hash_drift || availability_drift)
+}
+
 /// Env var carrying the session title to the harness. Shared with
 /// `spawn_hash` so the restart badge hashes the same key the spawn writes.
 pub(crate) const SESSION_TITLE_ENV_VAR: &str = "BUZZ_ACP_SESSION_TITLE";

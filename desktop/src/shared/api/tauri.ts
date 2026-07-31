@@ -7,6 +7,11 @@ import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
 } from "@/shared/api/installTypes";
+import {
+  fromRawManagedAgent,
+  type RawManagedAgent,
+} from "@/shared/api/managedAgentMapping";
+import { createRemoteRunnerApi } from "@/shared/api/remoteRunnerApi";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -16,7 +21,6 @@ import type {
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
-  ManagedAgentBackend,
   RelayAgent,
   RelayMember,
   RelayMemberRole,
@@ -43,6 +47,10 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
+export {
+  fromRawManagedAgent,
+  type RawManagedAgent,
+} from "@/shared/api/managedAgentMapping";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -118,52 +126,6 @@ type RawRelayAgent = {
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
-export type RawManagedAgent = {
-  pubkey: string;
-  name: string;
-  persona_id: string | null;
-  // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
-  runtime?: string | null;
-  team_id?: string | null;
-  relay_url: string;
-  acp_command: string;
-  agent_command: string;
-  agent_command_override?: string | null;
-  agent_args: string[];
-  mcp_command: string;
-  turn_timeout_seconds: number;
-  idle_timeout_seconds: number | null;
-  max_turn_duration_seconds: number | null;
-  parallelism: number;
-  system_prompt: string | null;
-  avatar_url?: string | null;
-  model: string | null;
-  model_source?: ManagedAgent["modelSource"];
-  provider: string | null;
-  persona_out_of_date: boolean;
-  persona_orphaned: boolean;
-  needs_restart: boolean;
-  env_vars?: Record<string, string>;
-  status: ManagedAgent["status"];
-  pid: number | null;
-  created_at: string;
-  updated_at: string;
-  last_started_at: string | null;
-  last_stopped_at: string | null;
-  last_exit_code: number | null;
-  last_error: string | null;
-  last_error_code: number | null;
-  log_path: string;
-  start_on_app_launch: boolean;
-  auto_restart_on_config_change?: boolean;
-  backend: ManagedAgentBackend;
-  backend_agent_id: string | null;
-  // Optional: pre-feature mock fixtures may omit these. Mapped to
-  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
-  respond_to?: ManagedAgent["respondTo"];
-  respond_to_allowlist?: string[];
-};
-
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
   private_key_nsec: string;
@@ -686,54 +648,6 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   };
 }
 
-export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
-  return {
-    pubkey: agent.pubkey,
-    name: agent.name,
-    personaId: agent.persona_id,
-    runtime: agent.runtime ?? null,
-    teamId: agent.team_id ?? null,
-    relayUrl: agent.relay_url,
-    acpCommand: agent.acp_command,
-    agentCommand: agent.agent_command,
-    agentCommandOverride: agent.agent_command_override ?? null,
-    agentArgs: agent.agent_args,
-    mcpCommand: agent.mcp_command,
-    turnTimeoutSeconds: agent.turn_timeout_seconds,
-    idleTimeoutSeconds: agent.idle_timeout_seconds,
-    maxTurnDurationSeconds: agent.max_turn_duration_seconds,
-    parallelism: agent.parallelism,
-    systemPrompt: agent.system_prompt,
-    avatarUrl: agent.avatar_url ?? null,
-    model: agent.model,
-    modelSource: agent.model_source ?? null,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
-    provider: agent.provider ?? null,
-    personaOutOfDate: agent.persona_out_of_date ?? false,
-    personaOrphaned: agent.persona_orphaned ?? false,
-    needsRestart: agent.needs_restart ?? false,
-    envVars: agent.env_vars ?? {},
-    status: agent.status,
-    pid: agent.pid,
-    createdAt: agent.created_at,
-    updatedAt: agent.updated_at,
-    lastStartedAt: agent.last_started_at,
-    lastStoppedAt: agent.last_stopped_at,
-    lastExitCode: agent.last_exit_code,
-    lastError: agent.last_error,
-    lastErrorCode: agent.last_error_code ?? null,
-    logPath: agent.log_path,
-    startOnAppLaunch: agent.start_on_app_launch,
-    autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
-    backend: agent.backend,
-    backendAgentId: agent.backend_agent_id,
-    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
-    // Real agent records always include them (defaulted server-side).
-    respondTo: agent.respond_to ?? "owner-only",
-    respondToAllowlist: agent.respond_to_allowlist ?? [],
-  };
-}
-
 export function fromRawAcpRuntimeCatalogEntry(
   entry: RawAcpRuntimeCatalogEntry,
 ): AcpRuntimeCatalogEntry {
@@ -838,6 +752,15 @@ export async function listManagedAgents(): Promise<ManagedAgent[]> {
     fromRawManagedAgent,
   );
 }
+
+export const {
+  listRemoteRunners,
+  getRemoteRunnerProtocolVersion,
+  inspectRemoteRunnerPairingUri,
+  pairRemoteRunner,
+  revokeRemoteRunner,
+  purgeRemoteRunnerWorkspace,
+} = createRemoteRunnerApi(invokeTauri);
 export async function createManagedAgent(input: CreateManagedAgentInput) {
   const response = await invokeTauri<RawCreateManagedAgentResponse>(
     "create_managed_agent",

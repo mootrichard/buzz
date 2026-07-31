@@ -1,0 +1,11 @@
+:3000 {
+  encode zstd gzip
+
+  handle /pair {
+    reverse_proxy pairing:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
+}

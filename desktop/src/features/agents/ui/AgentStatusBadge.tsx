@@ -11,11 +11,13 @@ export function AgentStatusBadge({
   presenceLoaded,
   presenceStatus,
   status,
+  deploymentState,
 }: {
   isWorking?: boolean;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   status: ManagedAgent["status"];
+  deploymentState?: string | null;
 }) {
   const [inGracePeriod, setInGracePeriod] = React.useState(true);
 
@@ -24,7 +26,10 @@ export function AgentStatusBadge({
     return () => clearTimeout(timer);
   }, []);
 
-  const isActive = status === "running" || status === "deployed";
+  const isActive =
+    status === "running" ||
+    status === "deployed" ||
+    deploymentState === "running";
   const isStarting =
     !inGracePeriod &&
     presenceLoaded &&
@@ -43,7 +48,7 @@ export function AgentStatusBadge({
     ? "Working"
     : isStarting
       ? "Starting\u2026"
-      : status.replace(/_/g, " ");
+      : (deploymentState ?? status).replace(/_/g, " ");
 
   return (
     <Badge

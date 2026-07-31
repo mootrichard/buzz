@@ -10,6 +10,7 @@ import {
   useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { shouldStartManagedAgentForMention } from "@/features/agents/lib/managedAgentControlActions";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
@@ -131,14 +132,6 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
   return [...new Set([...pubkeys].map(normalizePubkey))].filter(Boolean);
-}
-
-function isManagedAgentRunning(agent: ManagedAgent) {
-  return agent.status === "running" || agent.status === "deployed";
-}
-
-function isProviderBackedAgent(agent: ManagedAgent) {
-  return agent.backend.type === "provider";
 }
 
 const DM_THREAD_AGENT_MENTION_ERROR =
@@ -263,11 +256,7 @@ export function useMentionSendFlow({
 
         try {
           if (participantPubkeys.has(pubkey)) {
-            if (isProviderBackedAgent(agent)) {
-              if (agent.status !== "deployed") {
-                await startAgentMutation.mutateAsync(agent.pubkey);
-              }
-            } else if (!isManagedAgentRunning(agent)) {
+            if (shouldStartManagedAgentForMention(agent)) {
               await startAgentMutation.mutateAsync(agent.pubkey);
             }
           } else {

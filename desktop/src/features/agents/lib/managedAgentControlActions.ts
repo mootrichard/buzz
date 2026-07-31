@@ -31,13 +31,41 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
-export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
-  return agent.status === "running" || agent.status === "deployed";
+export function isManagedAgentActive(
+  agent: Pick<ManagedAgent, "status"> &
+    Partial<Pick<ManagedAgent, "deploymentState">>,
+) {
+  return (
+    agent.status === "running" ||
+    agent.status === "deployed" ||
+    (agent.deploymentState != null &&
+      ["pulling_image", "starting", "running"].includes(agent.deploymentState))
+  );
+}
+
+export function canRestartManagedAgent(
+  agent: Pick<ManagedAgent, "backend" | "status"> &
+    Partial<Pick<ManagedAgent, "deploymentState">>,
+) {
+  return (
+    (agent.backend.type === "local" || agent.backend.type === "runner") &&
+    isManagedAgentActive(agent)
+  );
+}
+
+export function shouldStartManagedAgentForMention(
+  agent: Pick<ManagedAgent, "backend" | "status"> &
+    Partial<Pick<ManagedAgent, "deploymentState">>,
+) {
+  return !isManagedAgentActive(agent);
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+  }
+  if (agent.backend.type === "runner") {
+    return isManagedAgentActive(agent) ? "Stop" : "Start";
   }
 
   if (isManagedAgentActive(agent)) {
