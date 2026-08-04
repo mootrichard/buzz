@@ -52,6 +52,7 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
+  bool includeNonMembers = true,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
@@ -77,6 +78,12 @@ List<MentionCandidate> buildMentionCandidates({
       ),
     );
   }
+
+  // A DM has a fixed participant set. Showing relay-wide people or agents in
+  // its autocomplete creates ambiguous duplicate-name choices that cannot
+  // actually join the conversation. Wait for the member snapshot instead of
+  // resolving a visible name to a non-participant pubkey.
+  if (!includeNonMembers) return candidates;
 
   final directoryPubkeys = <String>{};
   final sharedAgentPubkeys = <String>{};

@@ -777,6 +777,157 @@ async fn init_session_with_fake_mcp(h: &mut Harness, extra_mcp_env: &[(&str, &st
         .to_owned()
 }
 
+/// Some OpenAI-compatible providers occasionally ignore a forced first tool
+/// choice and return ordinary assistant text. That text is visible in the ACP
+/// activity transcript but is not a Buzz message, so accepting it ends the
+/// turn without replying to the user. The agent must keep the turn alive,
+/// force the delivery tool again, and suppress the undelivered text chunk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_initial_tool_omission_retries_until_the_delivery_tool_runs() {
+    let invisible = "This answer would only appear in the activity transcript.";
+    let llm = spawn_capturing_llm(vec![
+        openai_text(invisible),
+        openai_tool_call("tc_delivery", "fake__tool_0", json!({})),
+        openai_text("delivery complete"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[("BUZZ_AGENT_OPENAI_INITIAL_TOOL", "fake__tool_0")],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"reply in Buzz"}]}),
+        )
+        .await;
+    let mut saw_delivery_tool = false;
+    let mut leaked_invisible_text = false;
+    loop {
+        let message = h.recv().await;
+        let update = &message["params"]["update"];
+        if update["sessionUpdate"] == "tool_call" && update["title"] == "fake__tool_0" {
+            saw_delivery_tool = true;
+        }
+        if update["sessionUpdate"] == "agent_message_chunk"
+            && update["content"]["text"] == invisible
+        {
+            leaked_invisible_text = true;
+        }
+        if message["id"] == json!(prompt_id) {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+
+    assert!(saw_delivery_tool, "the required delivery tool never ran");
+    assert!(
+        !leaked_invisible_text,
+        "undelivered assistant text was exposed as a normal message chunk"
+    );
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected omission, retry, and completion"
+    );
+    for request in &captured[..2] {
+        assert_eq!(
+            request["tool_choice"]["function"]["name"], "fake__tool_0",
+            "the retry must force the delivery tool again"
+        );
+    }
+    let retry_messages = captured[1]["messages"].as_array().unwrap();
+    assert!(retry_messages
+        .iter()
+        .any(|message| { message["role"] == "assistant" && message["content"] == invisible }));
+    assert!(retry_messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("was not delivered"))
+    }));
+    drop(captured);
+    h.shutdown().await;
+}
+
+/// A provider can technically return a tool call while still ignoring the
+/// configured delivery tool. If it uses some other tool for reconnaissance
+/// and then ends with ordinary text, that text is still transcript-only. The
+/// guard must notice that no delivery tool completed, preserve the drafted
+/// answer, and force the configured tool on a correction round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nondelivery_tool_then_text_retries_until_delivery_tool_completes() {
+    let invisible = "I inspected the instance; this is the answer to publish.";
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc_recon", "fake__tool_1", json!({})),
+        openai_text(invisible),
+        openai_tool_call("tc_delivery", "fake__tool_0", json!({})),
+        openai_text("delivery complete"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[("BUZZ_AGENT_OPENAI_INITIAL_TOOL", "fake__tool_0")],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "2")]).await;
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"inspect then reply"}]}),
+        )
+        .await;
+    let mut saw_recon = false;
+    let mut saw_delivery = false;
+    let mut leaked_invisible_text = false;
+    loop {
+        let message = h.recv().await;
+        let update = &message["params"]["update"];
+        if update["sessionUpdate"] == "tool_call" && update["title"] == "fake__tool_1" {
+            saw_recon = true;
+        }
+        if update["sessionUpdate"] == "tool_call" && update["title"] == "fake__tool_0" {
+            saw_delivery = true;
+        }
+        if update["sessionUpdate"] == "agent_message_chunk"
+            && update["content"]["text"] == invisible
+        {
+            leaked_invisible_text = true;
+        }
+        if message["id"] == json!(prompt_id) {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+
+    assert!(saw_recon, "the reconnaissance tool never ran");
+    assert!(saw_delivery, "the required delivery tool never ran");
+    assert!(
+        !leaked_invisible_text,
+        "undelivered final text was exposed as a normal message chunk"
+    );
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 4);
+    assert_eq!(
+        captured[0]["tool_choice"]["function"]["name"],
+        "fake__tool_0"
+    );
+    assert_eq!(captured[1]["tool_choice"], "auto");
+    assert_eq!(
+        captured[2]["tool_choice"]["function"]["name"], "fake__tool_0",
+        "the correction round must force the delivery tool"
+    );
+    drop(captured);
+    h.shutdown().await;
+}
+
 /// `_Stop` hook objects on the first end_turn → agent must NOT stop.
 /// The hook returns an objection only on its first invocation; on the
 /// second end_turn (after a tool round), the hook stays silent so the

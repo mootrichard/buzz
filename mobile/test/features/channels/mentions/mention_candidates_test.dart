@@ -78,6 +78,36 @@ void main() {
   });
 
   group('buildMentionCandidates', () {
+    test('DM autocomplete excludes a same-name non-participant agent', () {
+      final candidates = buildMentionCandidates(
+        members: [
+          ChannelMember(
+            pubkey: 'remote-frame',
+            displayName: 'Frame',
+            role: 'bot',
+            joinedAt: DateTime(2024),
+          ),
+        ],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {
+          'remote-frame': UserProfile(
+            pubkey: 'remote-frame',
+            displayName: 'Frame',
+          ),
+        },
+        ownerByAgentPubkey: const {},
+        searchResults: const [
+          UserProfile(pubkey: 'stale-frame', displayName: 'Frame'),
+        ],
+        includeNonMembers: false,
+      );
+
+      expect(candidates, hasLength(1));
+      expect(candidates.single.pubkey, 'remote-frame');
+      expect(candidates.single.isMember, isTrue);
+    });
+
     test('members come first; eligible non-member agents follow', () {
       final candidates = buildMentionCandidates(
         members: [member(memberPubkey), member(userPubkey)],

@@ -22,18 +22,59 @@ use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+const INITIAL_TOOL_OMISSION_MAX_RETRIES: u32 = 2;
+const INITIAL_TOOL_RETRY_PROMPT: &str = "[Delivery correction] Your previous assistant text was not delivered to the user. Use the required first tool now to perform the user-visible action. Do not answer with assistant text alone.";
+
+fn configured_delivery_tool<'a>(
+    cfg: &'a Config,
+    tools: &[crate::types::ToolDef],
+) -> Option<&'a str> {
+    matches!(cfg.provider, Provider::OpenAi | Provider::Databricks)
+        .then(|| cfg.openai_initial_tool.as_deref())
+        .flatten()
+        .filter(|name| tools.iter().any(|tool| tool.name == *name))
+}
 
 fn initial_tool_response_required(
     cfg: &Config,
-    round: u32,
+    history: &[HistoryItem],
     tools: &[crate::types::ToolDef],
 ) -> bool {
-    round == 1
-        && matches!(cfg.provider, Provider::OpenAi | Provider::Databricks)
-        && cfg
-            .openai_initial_tool
-            .as_ref()
-            .is_some_and(|name| tools.iter().any(|tool| tool.name == *name))
+    matches!(history.last(), Some(HistoryItem::User(_)))
+        && configured_delivery_tool(cfg, tools).is_some()
+}
+
+fn shell_command_sends_buzz_message(command: &str) -> bool {
+    let Some(buzz) = command.find("buzz") else {
+        return false;
+    };
+    let Some(messages) = command[buzz + "buzz".len()..].find("messages") else {
+        return false;
+    };
+    command[buzz + "buzz".len() + messages + "messages".len()..].contains("send")
+}
+
+fn call_can_deliver_visible_output(cfg: &Config, call: &ToolCall) -> bool {
+    let Some(delivery_tool) = cfg.openai_initial_tool.as_deref() else {
+        return false;
+    };
+    if call.name != delivery_tool {
+        return false;
+    }
+
+    // The hosted Buzz runtime configures its generic shell tool as the
+    // required delivery tool. Merely running that shell is not delivery: the
+    // model may use it for reconnaissance and then finish with transcript-only
+    // assistant text. Only an actual `buzz messages send` command satisfies
+    // the delivery contract. A dedicated non-shell tool is itself the action.
+    if delivery_tool.ends_with("__shell") {
+        return call
+            .arguments
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(shell_command_sends_buzz_message);
+    }
+    true
 }
 
 pub struct RunCtx<'a> {
@@ -117,6 +158,8 @@ impl RunCtx<'_> {
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
+        let mut delivery_corrections = 0u32;
+        let mut visible_delivery_completed = false;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -150,6 +193,13 @@ impl RunCtx<'_> {
             if !self.skills.is_empty() {
                 tools.push(builtin::load_skill_def());
             }
+            // Keep this in lockstep with llm::openai_initial_tool(): the
+            // OpenAI-shaped request forces the configured tool whenever the
+            // newest history item is a user message. Remember whether that
+            // happened so a provider that ignores tool_choice cannot end the
+            // turn with assistant text that Buzz never publishes.
+            let required_initial_tool =
+                initial_tool_response_required(self.cfg, self.history, &tools);
             round = round.saturating_add(1);
             let response = tokio::select! {
                 biased;
@@ -248,6 +298,35 @@ impl RunCtx<'_> {
                 .await;
             }
 
+            let delivery_guard_enabled = configured_delivery_tool(self.cfg, &tools).is_some();
+            if delivery_guard_enabled
+                && !visible_delivery_completed
+                && response.tool_calls.is_empty()
+                && !response.text.trim().is_empty()
+            {
+                if delivery_corrections >= INITIAL_TOOL_OMISSION_MAX_RETRIES {
+                    return Err(AgentError::Llm(format!(
+                        "provider ended with undelivered assistant text after {} delivery retries",
+                        INITIAL_TOOL_OMISSION_MAX_RETRIES
+                    )));
+                }
+                delivery_corrections = delivery_corrections.saturating_add(1);
+                tracing::warn!(
+                    retry = delivery_corrections,
+                    max_retries = INITIAL_TOOL_OMISSION_MAX_RETRIES,
+                    required_initial_tool,
+                    "provider ended with assistant text before completing visible delivery; retrying before invisible text can end the turn"
+                );
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                self.history
+                    .push(HistoryItem::User(INITIAL_TOOL_RETRY_PROMPT.into()));
+                continue;
+            }
+
             if !response.text.is_empty() {
                 wire::send(
                     self.wire,
@@ -260,17 +339,6 @@ impl RunCtx<'_> {
                     ),
                 )
                 .await;
-            }
-
-            let required_initial_tool_missing =
-                initial_tool_response_required(self.cfg, round, &tools)
-                    && response.tool_calls.is_empty();
-            if required_initial_tool_missing {
-                return Err(AgentError::Llm(
-                    "provider ignored the required initial tool call; refusing to end the turn \
-                     with an invisible assistant-only response"
-                        .into(),
-                ));
             }
 
             if response.tool_calls.is_empty() {
@@ -322,9 +390,17 @@ impl RunCtx<'_> {
                 reasoning_details: response.reasoning_details,
             });
 
+            let history_before_results = self.history.len();
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
             }
+            visible_delivery_completed |= calls
+                .iter()
+                .zip(self.history[history_before_results..].iter())
+                .any(|(call, item)| {
+                    call_can_deliver_visible_output(self.cfg, call)
+                        && matches!(item, HistoryItem::ToolResult(result) if !result.is_error)
+                });
         }
     }
 
@@ -911,10 +987,64 @@ mod initial_tool_tests {
         let mut anthropic =
             Config::for_discovery(Provider::Anthropic, String::new(), String::new());
         anthropic.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
-        assert!(!initial_tool_response_required(&anthropic, 1, &[tool()]));
+        let user_history = vec![HistoryItem::User("reply".into())];
+        assert!(!initial_tool_response_required(
+            &anthropic,
+            &user_history,
+            &[tool()]
+        ));
 
         let mut openai = Config::for_discovery(Provider::OpenAi, String::new(), String::new());
         openai.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
-        assert!(initial_tool_response_required(&openai, 1, &[tool()]));
+        assert!(initial_tool_response_required(
+            &openai,
+            &user_history,
+            &[tool()]
+        ));
+    }
+
+    #[test]
+    fn initial_tool_requirement_tracks_the_request_shape_after_a_retry() {
+        let mut openai = Config::for_discovery(Provider::OpenAi, String::new(), String::new());
+        openai.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+
+        assert!(initial_tool_response_required(
+            &openai,
+            &[HistoryItem::User(INITIAL_TOOL_RETRY_PROMPT.into())],
+            &[tool()],
+        ));
+        assert!(!initial_tool_response_required(
+            &openai,
+            &[HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: Vec::new(),
+                reasoning_details: None,
+            }],
+            &[tool()],
+        ));
+    }
+
+    #[test]
+    fn generic_shell_only_counts_an_actual_buzz_message_send_as_delivery() {
+        let mut openai = Config::for_discovery(Provider::OpenAi, String::new(), String::new());
+        openai.openai_initial_tool = Some("buzz-dev-mcp__shell".into());
+
+        let reconnaissance = ToolCall {
+            provider_id: "recon".into(),
+            name: "buzz-dev-mcp__shell".into(),
+            arguments: json!({"command": "buzz channels list"}),
+            provider_extra: Default::default(),
+        };
+        assert!(!call_can_deliver_visible_output(&openai, &reconnaissance));
+
+        let delivery = ToolCall {
+            provider_id: "delivery".into(),
+            name: "buzz-dev-mcp__shell".into(),
+            arguments: json!({
+                "command": "printf 'answer' | buzz messages send --channel abc --content -"
+            }),
+            provider_extra: Default::default(),
+        };
+        assert!(call_can_deliver_visible_output(&openai, &delivery));
     }
 }

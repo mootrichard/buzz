@@ -84,6 +84,9 @@ final mentionCandidatesProvider = Provider.family
           ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
+      final isDmChannel = channels.any(
+        (channel) => channel.id == args.channelId && channel.isDm,
+      );
       final searchResults =
           ref.watch(mentionUserSearchProvider(args.query)).asData?.value ??
           const <UserProfile>[];
@@ -101,6 +104,7 @@ final mentionCandidatesProvider = Provider.family
         ownerByAgentPubkey: owners,
         searchResults: searchResults,
         currentPubkey: currentPubkey,
+        includeNonMembers: !isDmChannel,
       );
 
       return rankMentionCandidates(candidates, args.query);

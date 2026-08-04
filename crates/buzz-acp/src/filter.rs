@@ -350,8 +350,9 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 1. **channels** — if not `"all"`, the event's channel UUID must be in the list.
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
-///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+///    exist unless the caller explicitly allows an untagged event (used for DMs,
+///    whose membership already defines the private audience). Tag kind is checked
+///    via `tag.as_slice()` for stable, library-independent access.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
 /// # Fail-closed filter error handling
@@ -370,6 +371,7 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    allow_untagged: bool,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -387,7 +389,7 @@ pub async fn match_event(
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention {
+        if rule.require_mention && !allow_untagged {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();
                 s.first().map(|k| k.as_str()) == Some("p")
@@ -601,7 +603,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 0);
         assert_eq!(matched.prompt_tag, "tag-first");
     }
@@ -630,7 +634,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
     }
@@ -653,14 +659,37 @@ mod tests {
         )];
 
         // Without mention — no match.
-        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
+        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey, false).await;
         assert!(result.is_none());
 
         // With mention — matches.
-        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
+        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey, false)
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn direct_message_rule_accepts_a_p_tag_for_a_stale_agent_identity() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let stale_agent_pubkey = "badc0ffee0ddf00dbadc0ffee0ddf00dbadc0ffee0ddf00dbadc0ffee0ddf00d";
+        let event = make_event_with_p_tag(9, "@Frame hey homie", stale_agent_pubkey);
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            Some("@mention"),
+        )];
+
+        let matched = match_event(&event, channel_id, &rules, agent_pubkey, true).await;
+
+        assert_eq!(
+            matched.map(|value| value.prompt_tag),
+            Some("@mention".into())
+        );
     }
 
     #[tokio::test]
@@ -677,7 +706,7 @@ mod tests {
             None,
         )];
 
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(result.is_none());
     }
 
@@ -725,7 +754,9 @@ mod tests {
             None, // no explicit tag
         )];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
@@ -755,7 +786,7 @@ mod tests {
         ];
 
         // Must return None — not "catch-all".
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(
             result.is_none(),
             "filter error must fail closed, not fall through to next rule"
@@ -781,7 +812,7 @@ mod tests {
             .store(MAX_CONSECUTIVE_TIMEOUTS, Ordering::Relaxed);
 
         let rules = vec![rule];
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(result.is_none(), "disabled rule must return None");
     }
 }
